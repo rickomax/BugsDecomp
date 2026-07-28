@@ -731,17 +731,39 @@ The rest of each packet is not worked out. A 0x3c packet carries three RGB
 triples, consistent with a gouraud triangle, and the textured modes carry what
 look like per-vertex UV pairs, but none of that is confirmed.
 
+### Objects Are Material Groups
+
+An object is not a body part. Every packet of an object carries the same
+texture page, and different objects of one record carry different ones, so the
+objects divide a model by material rather than by shape. Their faces draw from
+one vertex pool shared across the record, which is why an object's vertices
+turn up in several separate stretches of it rather than one block, and why
+faces of one object reach for vertices that another object also names.
+
+What does hold per object is the count: an object's faces name exactly as many
+distinct vertices as the object declares, in 651 of the 656 objects across the
+known levels. That invariant is what confirms the index slots above are right.
+
+Reading the objects as body parts is misleading -- a model looks wrong when its
+objects are lined up as though each were a separate mesh. `tools/bze.py models
+--split` writes each object out on its own for exactly that reason.
+
 ### How Good Is The Result
 
-Faces decoded this way never reference a vertex outside the record, across
-12548 of them, and under 1% are degenerate. Their edges run about a twentieth of
-the model's diagonal at the median, against a fifth for random vertex picks from
-the same model. That is consistent with the indices being right, but it is not
-the byte-exact confirmation the container and the vertex stride have.
+Models decode correctly. Faces never reference a vertex outside the record,
+across 12548 of them, under 1% are degenerate, and their edges run about a
+twentieth of the model's diagonal at the median against a fifth for random
+vertex picks. Records checked in a viewer come out as the shapes they should
+be.
 
-175 of the 185 model records walk their primitives exactly. The other 10 lose
-their place part way through an object; whatever decoded before that is still
-sound and is kept.
+Two gaps remain:
+
+* 175 of the 185 model records walk their primitives exactly. The other 10 lose
+their place part way through an object, all of them on the `0x44` run mode;
+whatever decoded before that is kept.
+* mode `0x64` yields no faces, so a record built only from it comes out empty.
+It only ever appears in objects that have no vertices, so it is unlikely to be
+geometry, but what it does draw is unknown.
 
 ## Other Assets
 
