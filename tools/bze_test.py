@@ -18,9 +18,11 @@ checksum matched and every section 1 walked cleanly to its terminator. That is
 the check that says the format is right; this one says the code stays that way.
 """
 
+import os
 import random
 import struct
 import sys
+import tempfile
 
 import bze
 import tim
@@ -573,6 +575,118 @@ def make_tmd_with_quad():
             + verts)
 
 
+def make_tmd_with_textured_quad():
+    """Builds a one-object record holding a single 0x40 quad.
+
+    Mode 0x40 is the fullest of the textured primitives: a UV, a colour, a
+    texture page and a CLUT, with the colour given per corner.
+    """
+
+    prim_top = tmd.OBJECT_SIZE
+    size = tmd.PRIMITIVE_SIZES[0x40]
+    vert_top = prim_top + size
+    normal_top = vert_top + 4 * tmd.VERTEX_SIZE
+    table = struct.pack("<iIiIiIi", vert_top, 4, normal_top, 0, prim_top, 1, 0)
+
+    packet = bytearray(size)
+    struct.pack_into("<H", packet, 0, 1)
+    packet[3] = 0x40
+    layout = tmd.PRIMITIVE_LAYOUT[0x40]
+    for corner, (u, v) in enumerate(layout["uv"]):
+        packet[u] = 8 * corner            # 0, 8, 16, 24
+        packet[v] = 128 + 8 * corner      # 128, 136, 144, 152
+    struct.pack_into("<H", packet, layout["tpage"], 0x1234)
+    struct.pack_into("<H", packet, layout["clut"], 0x5678)
+    for corner, at in enumerate(layout["colours"]):
+        packet[at:at + 3] = bytes((corner, 2 * corner, 4 * corner))
+    for slot, vertex in zip(tmd.PRIMITIVE_SLOTS[0x40], (0, 1, 2, 3)):
+        struct.pack_into("<H", packet, slot * 2, vertex)
+
+    verts = b"".join(
+        struct.pack("<3fI", float(i), float(i * 2), 0.0, i) for i in range(4)
+    )
+    return (struct.pack("<III", tmd.TMD_ID, 0, 1) + table + bytes(packet)
+            + verts)
+
+
+def test_surface():
+    """UVs, vertex colours and the winding a face comes out with."""
+
+    record = make_tmd_with_textured_quad()
+    model = tmd.parse(record)
+    faces = model.object_faces(model.objects[0], len(record))
+    check(len(faces) == 1, "expected one face, got %d" % len(faces))
+    face = faces[0]
+    check(tuple(face) == (0, 1, 2, 3),
+          "the vertex indices came out as %r" % (tuple(face),))
+    check(face.uvs == [(0, 128), (8, 136), (16, 144), (24, 152)],
+          "the UVs came out as %r" % (face.uvs,))
+    check(face.colours == [(0, 0, 0), (1, 2, 4), (2, 4, 8), (3, 6, 12)],
+          "the colours came out as %r" % (face.colours,))
+    check(face.tpage == 0x1234 and face.clut == 0x5678,
+          "tpage/clut came out as %r/%r" % (face.tpage, face.clut))
+
+    # a quad is stored as two triangles sharing an edge, so its corners walk
+    # 0,1,3,2 to make a loop; reversed, because the stored winding faces in
+    check(tmd.face_loop(4) == (2, 3, 1, 0),
+          "a quad's loop is %r" % (tmd.face_loop(4),))
+    check(tmd.face_loop(3) == (2, 1, 0),
+          "a triangle's loop is %r" % (tmd.face_loop(3),))
+
+    # every corner gets a vertex of its own, since neither a UV nor a colour
+    # is shared between the faces that meet at one
+    positions, uvs, colours, loops = tmd.object_geometry(
+        model, model.objects[0], len(record), y_up=False)
+    check(loops == [[0, 1, 2, 3]], "the loop came out as %r" % (loops,))
+    check(len(positions) == 4 and len(uvs) == 4 and len(colours) == 4,
+          "the per-corner arrays are %d/%d/%d long"
+          % (len(positions), len(uvs), len(colours)))
+    check(positions[0] == (2.0, 4.0, 0.0),
+          "the first corner is %r, expected vertex 2" % (positions[0],))
+    check(uvs[0] == (16 / tmd.TEXTURE_PAGE_SIZE, 144 / tmd.TEXTURE_PAGE_SIZE),
+          "the first UV is %r" % (uvs[0],))
+    check(colours[0] == (2 / 255.0, 4 / 255.0, 8 / 255.0, 1.0),
+          "the first colour is %r" % (colours[0],))
+
+    # an untextured primitive still gets colours, but no UVs to go with them
+    plain = tmd.parse(make_tmd_with_quad())
+    _p, plain_uvs, plain_colours, _l = tmd.object_geometry(
+        plain, plain.objects[0], len(make_tmd_with_quad()), y_up=False)
+    check(plain_uvs == [], "an untextured face produced UVs: %r" % (plain_uvs,))
+    check(len(plain_colours) == 4,
+          "expected 4 colours, got %d" % len(plain_colours))
+
+    # the OBJ writer carries both: colours ride on the `v` lines, and a face
+    # names a texture coordinate per corner
+    path = os.path.join(tempfile.mkdtemp(), "quad.obj")
+    n_verts, n_faces = tmd.write_object_obj(
+        path, model, model.objects[0], len(record), "quad", y_up=False)
+    check((n_verts, n_faces) == (4, 1),
+          "the writer reported %d vertices and %d faces" % (n_verts, n_faces))
+    lines = open(path, encoding="utf-8").read().splitlines()
+    v_lines = [l for l in lines if l.startswith("v ")]
+    check(len(v_lines[0].split()) == 7,
+          "a `v` line should carry three colour channels: %r" % v_lines[0])
+    check(v_lines[0].split()[4:] == ["0.00784314", "0.0156863", "0.0313725"],
+          "the colour on the first `v` line is %r" % (v_lines[0],))
+    vt_lines = [l for l in lines if l.startswith("vt ")]
+    check(len(vt_lines) == 4, "expected 4 `vt` lines, got %d" % len(vt_lines))
+    # OBJ runs V up the image, the other way from a texture page
+    check(vt_lines[0].split()[2] == "%g" % (1.0 - 144 / tmd.TEXTURE_PAGE_SIZE),
+          "the first V is %r" % (vt_lines[0],))
+    f_lines = [l for l in lines if l.startswith("f ")]
+    check(f_lines == ["f 1/1 2/2 3/3 4/4"],
+          "the face line is %r" % (f_lines,))
+
+    # the same geometry through the whole-model writer, which groups objects
+    path = os.path.join(os.path.dirname(path), "whole.obj")
+    tmd.write_obj(path, model, len(record), "quad", y_up=False)
+    body = open(path, encoding="utf-8").read()
+    check("g quad_obj00" in body, "the whole-model writer wrote no group")
+    check("f 1/1 2/2 3/3 4/4" in body,
+          "the whole-model writer did not number from 1")
+
+
 def test_gltf():
     """A built glb must be well formed and place its meshes correctly."""
 
@@ -716,6 +830,7 @@ def main():
         test_tim,
         test_tmd,
         test_tod,
+        test_surface,
         test_gltf,
         test_container,
         test_bad_input,

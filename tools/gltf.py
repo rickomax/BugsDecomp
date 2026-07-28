@@ -18,6 +18,8 @@ Two conversions are worth knowing about:
   of its own here, so indices are resolved against that object's own vertices
   and renumbered. Seam vertices are stored once per part, each copy in its own
   part's space, so this is also what keeps a seam in the right place.
+- UVs and vertex colours belong to a face's corner, not to a vertex, so a
+  vertex goes out per corner rather than being shared.
 
 Everything lands in one .glb per model, with each of the model's animations as
 a separate glTF animation.
@@ -81,7 +83,7 @@ class Builder:
     def accessor(self, values, kind, component, target=None):
         """Adds an accessor over `values`, a list of numbers or tuples."""
 
-        counts = {"SCALAR": 1, "VEC3": 3, "VEC4": 4}
+        counts = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
         width = counts[kind]
         flat = []
         for value in values:
@@ -171,35 +173,23 @@ def quaternion(rotation):
     return (x, y, z, w)
 
 
-def part_geometry(model, obj, size):
-    """Returns (positions, triangle indices) for one object, in its own space.
+def part_geometry(model, obj, size, y_up=True):
+    """Returns (positions, uvs, colours, triangle indices) for one object.
 
-    Quads are split into two triangles across the corner order the game
-    stores, the same walk the OBJ writer uses.
+    UVs and colours belong to a face's corner rather than to a vertex, so the
+    geometry comes back with a vertex per corner; see `tmd.object_geometry`.
+    glTF only draws triangles, so each face's loop is fanned here.
     """
 
-    try:
-        faces = model.object_faces(obj, size)
-    except tmd.TmdError:
-        return [], []
-    if not faces:
-        return [], []
-
-    lookup = model.object_vertex_map(obj)
-    used = sorted({v for face in faces for v in face if v in lookup})
-    renumber = {v: i for i, v in enumerate(used)}
-    positions = [lookup[v] for v in used]
+    positions, uvs, colours, loops = tmd.object_geometry(
+        model, obj, size, y_up=y_up)
 
     indices = []
-    for face in faces:
-        loop = tmd._face_loop(face)
-        if any(v not in renumber for v in loop):
-            continue
+    for loop in loops:
         # fan the loop, which for a triangle is just the triangle
         for i in range(1, len(loop) - 1):
-            indices += [renumber[loop[0]], renumber[loop[i]],
-                        renumber[loop[i + 1]]]
-    return positions, indices
+            indices += [loop[0], loop[i], loop[i + 1]]
+    return positions, uvs, colours, indices
 
 
 # ---------------------------------------------------------------------------
@@ -246,19 +236,26 @@ def build(model, size, parents, node_objects, anims, name="model",
     for node, obj_index in sorted(node_objects.items()):
         if not 0 <= obj_index < len(model.objects):
             continue
-        positions, indices = part_geometry(model, model.objects[obj_index],
-                                           size)
+        positions, uvs, colours, indices = part_geometry(
+            model, model.objects[obj_index], size, False)
         if not positions or not indices:
             continue
         component = (UNSIGNED_INT if len(positions) > 0xFFFF
                      else UNSIGNED_SHORT)
+        attributes = {
+            "POSITION": builder.accessor(positions, "VEC3", FLOAT,
+                                         ARRAY_BUFFER),
+        }
+        if uvs:
+            attributes["TEXCOORD_0"] = builder.accessor(uvs, "VEC2", FLOAT,
+                                                        ARRAY_BUFFER)
+        if colours:
+            attributes["COLOR_0"] = builder.accessor(colours, "VEC4", FLOAT,
+                                                     ARRAY_BUFFER)
         builder.json["meshes"].append({
             "name": "%s_obj%02d" % (name, obj_index),
             "primitives": [{
-                "attributes": {
-                    "POSITION": builder.accessor(positions, "VEC3", FLOAT,
-                                                 ARRAY_BUFFER),
-                },
+                "attributes": attributes,
                 "indices": builder.accessor(indices, "SCALAR", component,
                                             ELEMENT_ARRAY_BUFFER),
                 "mode": TRIANGLES,

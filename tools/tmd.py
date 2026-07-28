@@ -84,6 +84,69 @@ PRIMITIVE_SLOTS = {
 }
 
 
+# Where the rest of a primitive's payload sits, as byte offsets into the
+# packet. `uv` is one (u, v) pair per corner, `colours` one RGB triple per
+# corner (or a single one for a flat mode), and `clut`/`tpage` the 16-bit
+# texture fields. None of this is in the game's code either; it was read off
+# the data, and two measurements pin it down:
+#
+# - which slots vary within one object. `tpage` holds still (1-4% of objects
+#   vary) while the UV pairs move on almost every face (84-96%), which is what
+#   separates the texture fields from the coordinates.
+# - the untextured modes are exactly 8 bytes shorter than their textured
+#   counterparts and carry no such block, which is the room the UVs take up.
+#
+# Colours read as PSX vertex colours: 0x80 is neutral, and they are grey for
+# 100% of flat faces and most gouraud ones, tinted for the rest.
+PRIMITIVE_LAYOUT = {
+    0x38: {"uv": [(4, 5), (8, 9), (12, 13)], "clut": 6, "tpage": 10,
+           "colours": [16]},
+    0x3C: {"uv": [(4, 5), (8, 9), (12, 13)], "clut": 6, "tpage": 10,
+           "colours": [16, 20, 24]},
+    0x40: {"uv": [(4, 5), (8, 9), (12, 13), (14, 15)], "clut": 6, "tpage": 10,
+           "colours": [16, 20, 24, 28]},
+    0x4A: {"uv": None, "clut": None, "tpage": None, "colours": [8, 12, 16]},
+    0x4E: {"uv": None, "clut": None, "tpage": None,
+           "colours": [8, 12, 16, 20]},
+}
+
+# A texture page is this many texels across, so a stored coordinate divided by
+# it lands in the 0..1 the usual formats want.
+TEXTURE_PAGE_SIZE = 256.0
+
+# The stored winding faces inward: taking each face's corners in the order
+# they are stored, 74% of the known levels' faces have their normal pointing
+# at the model's middle rather than away from it. Both writers reverse it.
+REVERSE_WINDING = True
+
+
+class Face:
+    """One face: its corners, and whatever the mode carries alongside them."""
+
+    def __init__(self, mode, indices, uvs=None, colours=None,
+                 tpage=None, clut=None):
+        self.mode = mode
+        # vertex indices, in the order the packet stores them
+        self.indices = indices
+        # one (u, v) per corner, in texels, or None for an untextured mode
+        self.uvs = uvs
+        # one (r, g, b) per corner; a flat mode gives the same one to each
+        self.colours = colours
+        self.tpage = tpage
+        self.clut = clut
+
+    # a face stands in for its corners, so callers that only want those can
+    # treat it as the tuple it used to be
+    def __iter__(self):
+        return iter(self.indices)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        return self.indices[index]
+
+
 class TmdError(Exception):
     """Raised when data is not a model record."""
 
@@ -186,7 +249,7 @@ class Tmd:
                 out[low] = vert
         return out
 
-    def object_vertex_map(self, obj):
+    def object_vertex_map(self, obj, world=None):
         """Returns {index: (x, y, z)} for one object, in its own local space.
 
         Faces index the record-wide space, but a seam vertex is stored once
@@ -196,6 +259,9 @@ class Tmd:
         arrives in a sibling's coordinate frame. An object's own vertices
         cover every index its faces name, in all 672 objects of the known
         levels.
+
+        `world` is an optional (matrix, translation) pair to take the vertices
+        through, which is how an animation's pose places the object.
         """
 
         out = {}
@@ -205,6 +271,13 @@ class Tmd:
             if at + VERTEX_SIZE > len(self._data):
                 raise TmdError("vertex area runs past the end of the data")
             x, y, z, field = struct.unpack_from("<3fI", self._data, at)
+            if world:
+                m, t = world
+                x, y, z = (
+                    m[0][0] * x + m[0][1] * y + m[0][2] * z + t[0],
+                    m[1][0] * x + m[1][1] * y + m[1][2] * z + t[1],
+                    m[2][0] * x + m[2][1] * y + m[2][2] * z + t[2],
+                )
             out.setdefault(field & 0x7FFF, (x, y, z))
         return out
 
@@ -247,7 +320,11 @@ class Tmd:
         return out
 
     def object_faces(self, obj, size):
-        """Walks one object's primitives, returning its faces."""
+        """Walks one object's primitives, returning its faces.
+
+        Each face is a `Face`; iterating one gives its vertex indices, so
+        anything that only wants the corners can treat it as a tuple.
+        """
 
         out = []
         if obj.n_prim:
@@ -274,9 +351,29 @@ class Tmd:
                     raise TmdError("a primitive runs past its area")
                 slots = PRIMITIVE_SLOTS.get(mode)
                 if slots:
+                    at = base + pos
                     values = struct.unpack_from(
-                        "<%dH" % (packet_size // 2), self._data, base + pos)
-                    out.append(tuple(values[s] for s in slots))
+                        "<%dH" % (packet_size // 2), self._data, at)
+                    indices = tuple(values[s] for s in slots)
+                    layout = PRIMITIVE_LAYOUT.get(mode, {})
+                    uvs = None
+                    if layout.get("uv"):
+                        uvs = [(self._data[at + u], self._data[at + v])
+                               for u, v in layout["uv"]]
+                    colours = None
+                    if layout.get("colours"):
+                        colours = [tuple(self._data[at + c + k]
+                                         for k in range(3))
+                                   for c in layout["colours"]]
+                        # a flat mode gives one colour to every corner
+                        while len(colours) < len(indices):
+                            colours.append(colours[0])
+                    fields = {}
+                    for key in ("tpage", "clut"):
+                        if layout.get(key) is not None:
+                            fields[key] = struct.unpack_from(
+                                "<H", self._data, at + layout[key])[0]
+                    out.append(Face(mode, indices, uvs, colours, **fields))
                 pos += packet_size
                 left -= 1
 
@@ -360,99 +457,160 @@ def to_y_up(vertices):
     return [(x, -y, -z) for x, y, z in vertices]
 
 
-def _face_loop(face):
-    """Puts a face's corners in the order a polygon wants them.
+def face_loop(count):
+    """The order to walk a face's corners in, as positions within the face.
 
     A quad is stored the PSX way, as two triangles sharing an edge (0,1,2 and
     1,2,3), so its corners have to be walked 0,1,3,2 to come out as a loop
-    rather than a bowtie.
+    rather than a bowtie. The loop is then reversed, because the stored
+    winding faces inward; see `REVERSE_WINDING`.
     """
 
-    if len(face) == 4:
-        return (face[0], face[1], face[3], face[2])
-    return face
+    order = (0, 1, 3, 2) if count == 4 else tuple(range(count))
+    return order[::-1] if REVERSE_WINDING else order
+
+
+def _face_loop(face):
+    """As `face_loop`, but returning the vertex indices themselves."""
+
+    return tuple(face[i] for i in face_loop(len(face)))
+
+
+def object_geometry(model, obj, size, transforms=None, y_up=True):
+    """Returns (positions, uvs, colours, loops) for one object.
+
+    A UV and a colour belong to a corner of a face rather than to a vertex, so
+    two faces meeting at a vertex rarely agree about either. The only way to
+    carry them is to give every corner a vertex of its own, which is what this
+    does: `positions`, `uvs` and `colours` are all the same length, and each
+    entry of `loops` is one face as a list of positions into them.
+
+    `colours` is always filled in, with white where a primitive carries none.
+    `uvs` is empty unless something in the object is textured, since a UV
+    means nothing without a texture to look it up in.
+    """
+
+    try:
+        faces = model.object_faces(obj, size)
+    except TmdError:
+        return [], [], [], []
+    if not faces:
+        return [], [], [], []
+
+    world = None
+    if transforms:
+        index = next((i for i, o in enumerate(model.objects) if o is obj), None)
+        world = transforms.get(index)
+    lookup = model.object_vertex_map(obj, world)
+    positions, uvs, colours, loops = [], [], [], []
+    textured = any(face.uvs for face in faces)
+
+    for face in faces:
+        order = face_loop(len(face))
+        if any(face.indices[i] not in lookup for i in order):
+            continue
+        loop = []
+        for corner in order:
+            loop.append(len(positions))
+            positions.append(lookup[face.indices[corner]])
+            if textured:
+                if face.uvs:
+                    u, v = face.uvs[corner]
+                    uvs.append((u / TEXTURE_PAGE_SIZE, v / TEXTURE_PAGE_SIZE))
+                else:
+                    uvs.append((0.0, 0.0))
+            if face.colours:
+                r, g, b = face.colours[corner]
+                colours.append((r / 255.0, g / 255.0, b / 255.0, 1.0))
+            else:
+                colours.append((1.0, 1.0, 1.0, 1.0))
+        loops.append(loop)
+
+    if y_up:
+        positions = to_y_up(positions)
+    return positions, uvs, colours, loops
+
+
+def _write_obj_part(fp, positions, uvs, colours, loops, base, flip_v=True):
+    """Writes one object's geometry, with `base` vertices already written."""
+
+    for (x, y, z), colour in zip(positions, colours):
+        # the colours are an extension: a `v` line may carry r g b after xyz
+        fp.write("v %g %g %g %g %g %g\n"
+                 % (x, y, z, colour[0], colour[1], colour[2]))
+    for u, v in uvs:
+        # OBJ has V running up the image, the other way from a texture page
+        fp.write("vt %g %g\n" % (u, 1.0 - v if flip_v else v))
+    for loop in loops:
+        corners = []
+        for i in loop:
+            n = base + i + 1  # OBJ counts from 1
+            corners.append("%d/%d" % (n, n) if uvs else str(n))
+        fp.write("f %s\n" % " ".join(corners))
 
 
 def write_obj(path, model, size, name="model", transforms=None, y_up=True):
     """Writes a model out as a Wavefront OBJ.
 
-    Vertex indices run across the whole record, so the vertices go out as one
-    list and the faces index into it. Each object becomes its own group, so a
-    viewer can show them apart. `transforms` poses the model; see
-    `Tmd.all_vertices`.
+    Each object becomes its own group, so a viewer can show them apart.
+    `transforms` poses the model; see `Tmd.all_vertices`. Vertices are not
+    shared between faces, for the reason given in `object_geometry`.
     """
 
-    verts = model.all_vertices(transforms)
-    if y_up:
-        verts = to_y_up(verts)
-    total = 0
+    total_verts = total_faces = 0
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, from a BBLiT model record\n" % name)
         fp.write("o %s\n" % name)
-        for x, y, z in verts:
-            fp.write("v %g %g %g\n" % (x, y, z))
         for i, obj in enumerate(model.objects):
             try:
-                faces = model.object_faces(obj, size)
+                model.object_faces(obj, size)
             except TmdError as err:
                 # keep the objects that do walk
                 fp.write("# object %d: %s\n" % (i, err))
                 continue
-            if not faces:
+            positions, uvs, colours, loops = object_geometry(
+                model, obj, size, transforms, y_up)
+            if not loops:
                 continue
             fp.write("g %s_obj%02d\n" % (name, i))
-            for face in faces:
-                # OBJ counts vertices from 1
-                fp.write("f %s\n"
-                         % " ".join(str(v + 1) for v in _face_loop(face)))
-            total += len(faces)
-    return len(verts), total
+            _write_obj_part(fp, positions, uvs, colours, loops, total_verts)
+            total_verts += len(positions)
+            total_faces += len(loops)
+    return total_verts, total_faces
 
 
 def write_object_obj(path, model, obj, size, name="object", transforms=None,
                      y_up=True):
     """Writes one object of a record as an OBJ of its own.
 
-    An object's faces may reach for vertices outside its own block, so this
-    takes whichever vertices its faces actually name and renumbers them. That
-    keeps each file self-contained and shows exactly what that one object
-    draws, which is what makes it useful for telling a good object from a bad
-    one.
+    Each file is self-contained, which is what makes it useful for telling a
+    good object from a bad one. An object with no faces still gets its own
+    vertices written, so that a record which will not walk shows something.
     """
 
-    verts = model.all_vertices(transforms)
-    if y_up:
-        verts = to_y_up(verts)
-    try:
-        faces = model.object_faces(obj, size)
-    except TmdError:
-        faces = []
+    positions, uvs, colours, loops = object_geometry(
+        model, obj, size, transforms, y_up)
 
-    if faces:
-        used = sorted({v for face in faces for v in face})
-    else:
+    if not loops:
         # nothing walked, so fall back to the object's own vertices
+        verts = model.all_vertices(transforms)
+        if y_up:
+            verts = to_y_up(verts)
         start = 0
         for other in sorted(model.objects, key=lambda o: o.vert_top):
             if other is obj:
                 break
             start += other.n_vert
-        used = list(range(start, start + obj.n_vert))
-    renumber = {v: i for i, v in enumerate(used)}
+        positions = [verts[v] for v in range(start, start + obj.n_vert)
+                     if v < len(verts)]
+        uvs, colours = [], [(1.0, 1.0, 1.0, 1.0)] * len(positions)
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, one object of a BBLiT model record\n" % name)
         fp.write("o %s\n" % name)
-        for v in used:
-            if v < len(verts):
-                fp.write("v %g %g %g\n" % verts[v])
-            else:
-                fp.write("v 0 0 0\n")
-        for face in faces:
-            fp.write("f %s\n"
-                     % " ".join(str(renumber[v] + 1) for v in _face_loop(face)))
-    return len(used), len(faces)
+        _write_obj_part(fp, positions, uvs, colours, loops, 0)
+    return len(positions), len(loops)
 
 
 def main(argv=None):

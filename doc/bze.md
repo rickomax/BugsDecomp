@@ -738,9 +738,44 @@ A quad's four corners are stored the PSX way, as two triangles sharing an edge
 (0,1,2 and 1,2,3), so they have to be walked 0,1,3,2 to give a loop rather than
 a bowtie.
 
-The rest of each packet is not worked out. A 0x3c packet carries three RGB
-triples, consistent with a gouraud triangle, and the textured modes carry what
-look like per-vertex UV pairs, but none of that is confirmed.
+That loop then has to be reversed, because the stored winding faces inward. The
+test is a face's normal against its object's centroid: with the stored order,
+9112 of 12298 faces point in and only 3186 point out. Reversed, four in five
+point out, which is what a closed mesh should do. It is worth stating plainly
+that this is the one part of the model format decided by a measurement rather
+than by the data saying so -- the PSX draws both sides, so nothing in the file
+has to be consistent about it.
+
+### UVs, Colours And Texture Pages
+
+The rest of a packet is a UV and a colour per corner, plus a texture page and a
+CLUT for the whole face:
+
+| mode | UV bytes (u,v)              | CLUT | page | colour bytes  |
+|------|-----------------------------|------|------|---------------|
+| 0x38 | 4,5 8,9 12,13               | 6    | 10   | 16            |
+| 0x3c | 4,5 8,9 12,13               | 6    | 10   | 16 20 24      |
+| 0x40 | 4,5 8,9 12,13 14,15         | 6    | 10   | 16 20 24 28   |
+| 0x4a | --                          | --   | --   | 8 12 16       |
+| 0x4e | --                          | --   | --   | 8 12 16 20    |
+
+A colour is three bytes, RGB. `0x38` gives one colour to the whole face and the
+rest give one per corner, which matches flat against gouraud shading; `0x4a` and
+`0x4e` are exactly 8 bytes shorter than the textured triangle and quad above
+them, the 8 bytes being the UVs, the CLUT and the page.
+
+What separates a UV byte from anything else in the packet is how it varies. A
+texture page is constant across an object, because an object *is* a material
+group, so the slot holding it changes between the faces of one object in only
+1-4% of objects. Every slot named as a UV above changes in 84-96% of them. Those
+two figures do not overlap, which is what settles the assignment. The colours
+back it up separately: `0x38` faces are grey (r=g=b) in every instance, `0x4a`
+in two thirds, and the gouraud modes in about two fifths -- far more grey than
+arbitrary bytes would give, and the pattern shading data has.
+
+A UV is a byte offset into a 256-wide texture page, so the exporters divide by
+256. OBJ runs V up the image where a texture page runs it down, so `vt` lines
+carry `1 - v`; glTF agrees with the page and is left alone.
 
 ### Objects Are Material Groups
 
@@ -859,6 +894,14 @@ whichever vertices its faces name and renumbering them so the file stands alone
 `--pose` places each model's objects using its skeleton and bind pose from the
 TOD animations, and `anims` lists them; the TOD format itself is readable on
 its own through `tools/tod.py`.
+
+Both writers carry the per-corner UVs and colours described above. Neither
+format can hang them off a shared vertex -- two faces meeting at a vertex
+rarely agree about either -- so each corner gets a vertex of its own. In OBJ a
+colour rides on the `v` line as three extra numbers (`v x y z r g b`), which
+Blender and MeshLab read, and which a reader that does not understand it will
+ignore; texture coordinates go out as `vt` lines with `f v/vt` faces. In glTF
+they are the `COLOR_0` and `TEXCOORD_0` attributes.
 
 `--gltf` writes a glTF 2.0 binary (`.glb`) per model instead, carrying the node
 tree, one mesh per object, and every animation of that model. The mapping is
