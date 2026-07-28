@@ -76,6 +76,13 @@ NOTE: for some sections, the stored number of items seems to be the actual
 number, i.e. it's not one less than the actual number. There currently does not
 appear to be an obvious pattern to these off-by-1 errors.
 
+The decompressor itself (v1.0 0x431160) is not where the discrepancy comes from:
+it checks the counter only after processing an item, so it always processes one
+more item than the stored value, with no path that does otherwise. The extra
+item's output presumably runs past the end of the real data, which is harmless
+as long as the result is truncated to the size the section is expected to
+decompress to.
+
 ## Length Encoding
 
 Length values are further compressed via a LUT that can be pre-calculated from
@@ -120,7 +127,7 @@ bytes backward from the end of the current decompressed buffer". In some cases,
 the length may be greater than the offset, meaning that some/all of the bytes
 are copied multiple times. For example, given an offset/length pair of 3/8, and
 assuming the last 4 decompressed bytes are `de ad be ef`, then the additional
-decompressed bytes would be `ad be ef ad be ef ad de`.
+decompressed bytes would be `ad be ef ad be ef ad be`.
 
 Example C code (`src` points to current item; `dst` points to destination):
 
@@ -572,3 +579,19 @@ The following table summarizes known action codes:
 [^global]: `global` refers to the 256-byte array at the end of GamesaveN.dat
 [^gmod]: most operations that modify globals have code to handle the total
 golden carrot count, which is split across two bytes
+
+# Reading BZE Files
+
+`tools/bze.py` implements this document: it lists an archive's sections and
+extracts them, decompressing as it goes.
+
+    python3 tools/bze.py list <file.bze>
+    python3 tools/bze.py extract <file.bze> -o <outdir>
+
+Pass `--raw` to write sections without decompressing them, and `--force` to go
+on despite a bad checksum or inconsistent header.
+
+`tools/bze_test.py` checks the implementation against a transcription of the
+game's own decompression loop over every combination of the format's options. It
+does not check either against a real level, since there is none in this
+repository.

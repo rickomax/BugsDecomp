@@ -21,6 +21,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "BugsDecomp", "BugsDecomp\Bu
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{B7C2F9A4-1D6E-4A83-9F52-3C0E5A9D41B7}"
 	ProjectSection(SolutionItems) = preProject
+		tools\bze.py = tools\bze.py
+		tools\bze_test.py = tools\bze_test.py
 		tools\check_recon.py = tools\check_recon.py
 		tools\recon.py = tools\recon.py
 	EndProjectSection
