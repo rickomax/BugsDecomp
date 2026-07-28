@@ -14,11 +14,12 @@ converted for the PC, though, so a stock PSX TMD reader will not read them:
   What is verified is the stride: every vertex area across the known levels is
   exactly `count * 16` bytes.
 - primitive packets are variable length and do not use the PSX's
-  olen/ilen/flag/mode header. Byte 3 of a packet is a mode that fixes its
-  length, and the vertex indices sit at fixed slots within it; both were
-  recovered from the data, and `PRIMITIVES` records what came out.
-- vertex indices are numbered across the whole record, not per object, which
-  is also what each vertex's own index field counts.
+  olen/ilen/flag/mode header. Byte 3 is a mode that fixes the length; the
+  table comes from the game itself (v1.0 0x423f30). Where the vertex indices
+  sit inside a packet is not in the game's code and was recovered from the
+  levels instead, so only some modes yield faces.
+- vertex indices are numbered across the whole record, not per object, with
+  the objects counted in the order their vertex areas appear.
 
 Usage:
 
@@ -36,27 +37,50 @@ TMD_ID = 0x41
 
 HEADER_SIZE = 12
 OBJECT_SIZE = 28
-# three floats and the vertex's index
+# three floats and a fourth field of unclear purpose
 VERTEX_SIZE = 16
 
-# Primitive packets, keyed by the mode byte at offset 3. `size` is the whole
-# packet; `slots` are the 16-bit slots within it holding the vertex indices, in
-# winding order.
+# Bytes one primitive takes up, keyed by the mode byte at offset 3. Taken
+# straight out of the game: v1.0 0x423f30 walks every object's primitives with
+# this exact switch, so the table is complete and authoritative, covering modes
+# that never turn up in the levels shipped with the game.
 #
-# Both were recovered from the levels rather than from any documentation, and
-# both are pinned down hard: the sizes are the only ones that let every
-# primitive area partition exactly into its object's primitive count, and for
-# each mode the slots are the only choice valid across every packet -- for the
-# triangle they are the unique such choice out of all 560 possibilities.
-PRIMITIVES = {
-    0x38: (28, (10, 11, 12, 13)),
-    0x3C: (32, (7, 14, 15)),
-    0x40: (40, (16, 17, 18, 19)),
-    0x4A: (28, (10, 11, 12, 13)),
-    0x4E: (32, (12, 13, 14, 15)),
-    # 16 bytes, and only ever seen in objects that have no vertices at all, so
-    # what it draws is unknown; it carries no vertex indices
-    0x64: (16, ()),
+# Note a packet's first 16-bit field is a count of the primitives left in the
+# run, which each following primitive repeats one lower. That makes every
+# primitive self-describing, so a walk needs only the mode byte.
+PRIMITIVE_SIZES = {
+    0x00: 16, 0x04: 16, 0x08: 56, 0x0C: 56, 0x10: 20, 0x1C: 24, 0x20: 28,
+    0x2C: 32, 0x30: 36, 0x34: 24, 0x38: 28, 0x3C: 32, 0x40: 40, 0x4A: 28,
+    0x4E: 32, 0x64: 16,
+}
+
+# The other family: one header covering a whole run, followed by that many
+# primitives of a fixed stride, with nothing repeated in between. The mode
+# names (stride, tail) -- the tail is extra bytes the run carries at the end.
+# The game consumes the whole run from the primitive count in one step, so a
+# reader has to as well, or it loses its place.
+PRIMITIVE_RUNS = {
+    0x14: (16, 0), 0x18: (20, 0), 0x24: (20, 0), 0x28: (24, 0),
+    0x44: (12, 4), 0x48: (24, 0), 0x4C: (28, 0),
+}
+
+# Which 16-bit slots of a packet hold its vertex indices. Unlike the sizes,
+# these are not in the game's code -- 0x423f30 only registers texture pages --
+# so they were recovered from the levels, and only the modes below are settled.
+# A mode that is not here is still walked correctly, it just yields no face.
+PRIMITIVE_SLOTS = {
+    # triangles
+    0x3C: (7, 14, 15),
+    0x4A: (10, 11, 12),
+    # same packet size as 0x4a and the same slots fit, but only 8 of these
+    # exist in the known levels, too few to tell a triangle from a quad; the
+    # triangle is the safe reading, since a wrong fourth corner is visible
+    # rubbish while a missing one only costs a face
+    0x38: (10, 11, 12),
+    # quads, where the fourth corner sits as close to the other three as they
+    # do to each other, which is what says it is really part of the face
+    0x40: (16, 17, 18, 19),
+    0x4E: (12, 13, 14, 15),
 }
 
 
@@ -136,33 +160,64 @@ class Tmd:
                    size - HEADER_SIZE)
         return self.base + obj.prim_top, end - obj.prim_top
 
-    def faces(self, size):
+    def faces(self, size, partial=False):
         """Returns the record's faces, as tuples of vertex indices.
 
         Raises TmdError if the packets do not partition an object's primitive
         area exactly, which is what says the mode table read them correctly.
+        With `partial`, a walk that loses its place keeps whatever it decoded
+        before that -- everything up to the failure is still sound -- and the
+        objects after it are skipped.
         """
+
+        if partial:
+            out = []
+            for obj in self.objects:
+                try:
+                    out.extend(self._object_faces(obj, size))
+                except TmdError:
+                    continue
+            return out
 
         out = []
         for obj in self.objects:
-            if not obj.n_prim:
-                continue
+            out.extend(self._object_faces(obj, size))
+        return out
+
+    def _object_faces(self, obj, size):
+        """Walks one object's primitives, returning its faces."""
+
+        out = []
+        if obj.n_prim:
             base, span = self.primitive_area(obj, size)
             pos = 0
-            for i in range(obj.n_prim):
+            left = obj.n_prim
+            while left > 0:
                 if pos + 4 > span:
-                    raise TmdError("primitive %d runs past its area" % i)
+                    raise TmdError("a primitive runs past its area")
                 mode = self._data[base + pos + 3]
-                if mode not in PRIMITIVES:
+
+                if mode in PRIMITIVE_RUNS:
+                    # one header for the whole run; the count is in front of it
+                    stride, tail = PRIMITIVE_RUNS[mode]
+                    count = struct.unpack_from("<H", self._data, base + pos)[0]
+                    pos += stride * count + tail
+                    left -= count or 1
+                    continue
+
+                if mode not in PRIMITIVE_SIZES:
                     raise TmdError("unknown primitive mode 0x%02x" % mode)
-                packet_size, slots = PRIMITIVES[mode]
+                packet_size = PRIMITIVE_SIZES[mode]
                 if pos + packet_size > span:
-                    raise TmdError("primitive %d runs past its area" % i)
+                    raise TmdError("a primitive runs past its area")
+                slots = PRIMITIVE_SLOTS.get(mode)
                 if slots:
                     values = struct.unpack_from(
                         "<%dH" % (packet_size // 2), self._data, base + pos)
                     out.append(tuple(values[s] for s in slots))
                 pos += packet_size
+                left -= 1
+
             if pos != span:
                 raise TmdError(
                     "primitives filled %d of %d bytes" % (pos, span))
@@ -239,11 +294,8 @@ def write_obj(path, model, size, name="model"):
     """
 
     verts = model.all_vertices()
-    try:
-        faces = model.faces(size)
-    except TmdError:
-        # the geometry is still worth writing out without them
-        faces = []
+    # keep whatever walks, even if one object loses its place part way
+    faces = model.faces(size, partial=True)
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, from a BBLiT model record\n" % name)

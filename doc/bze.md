@@ -668,48 +668,80 @@ the objects counted in the order their vertex areas appear.
 
 ### Primitives
 
-Primitive packets are variable length. Byte 3 is a mode that fixes the length,
-and the vertex indices sit at fixed 16-bit slots inside the packet:
+Primitive packets are variable length, and byte 3 is a mode that fixes the
+length. The game's own walker, v1.0 0x423f30, switches on exactly that byte, so
+the sizes below are taken from it rather than guessed, and cover modes that no
+shipped level uses.
 
-| mode | size | index slots  | shape    |
-|------|------|--------------|----------|
-| 0x38 | 28   | 10,11,12,13  | quad     |
-| 0x3c | 32   | 7,14,15      | triangle |
-| 0x40 | 40   | 16,17,18,19  | quad     |
-| 0x4a | 28   | 10,11,12,13  | quad     |
-| 0x4e | 32   | 12,13,14,15  | quad     |
-| 0x64 | 16   | none         | unknown  |
+There are two families. Most modes repeat a header on every primitive, so each
+one is self-describing:
 
-Neither the sizes nor the slots are documented anywhere; both were recovered
-from the levels, and both are pinned down tightly:
+| mode | bytes | mode | bytes | mode | bytes | mode | bytes |
+|------|-------|------|-------|------|-------|------|-------|
+| 0x00 | 16    | 0x10 | 20    | 0x30 | 36    | 0x40 | 40    |
+| 0x04 | 16    | 0x1c | 24    | 0x34 | 24    | 0x4a | 28    |
+| 0x08 | 56    | 0x20 | 28    | 0x38 | 28    | 0x4e | 32    |
+| 0x0c | 56    | 0x2c | 32    | 0x3c | 32    | 0x64 | 16    |
 
-* the sizes are the only ones under which every primitive area partitions
-exactly into its object's primitive count (744 of 754 areas; the other 10 use
-three further modes, 0x00, 0x08 and 0x44, that are too rare to pin down)
-* for each mode the slots are the only choice valid across every packet of that
-mode. For the triangle they are the unique such choice out of all 560
-possibilities, which is what identifies it as a triangle rather than a quad.
+The rest carry one header for a whole run of primitives, with nothing repeated
+in between. The count sits in the first `short`, and the run takes
+`stride * count + tail` bytes and consumes `count` of the object's primitives at
+once, so a reader that treats it as a single primitive loses its place:
+
+| mode | stride | tail | mode | stride | tail |
+|------|--------|------|------|--------|------|
+| 0x14 | 16     | 0    | 0x44 | 12     | 4    |
+| 0x18 | 20     | 0    | 0x48 | 24     | 0    |
+| 0x24 | 20     | 0    | 0x4c | 28     | 0    |
+| 0x28 | 24     | 0    |      |        |      |
+
+In the self-describing family, the first `short` of a packet counts the
+primitives left in the run, and each following primitive repeats it one lower.
+
+Where the vertex indices sit inside a packet is *not* in the game's code --
+0x423f30 only registers texture pages -- so those were recovered from the levels:
+
+| mode | shape    | index slots (16-bit) |
+|------|----------|----------------------|
+| 0x38 | triangle | 10,11,12             |
+| 0x3c | triangle | 7,14,15              |
+| 0x40 | quad     | 16,17,18,19          |
+| 0x4a | triangle | 10,11,12             |
+| 0x4e | quad     | 12,13,14,15          |
+
+Only these are settled; any other mode is still walked correctly but yields no
+face. Telling a triangle from a quad takes more than checking the indices are in
+range, because a fourth slot that is not a corner is usually in range anyway.
+What separates them is distance: for 0x40 and 0x4e the fourth corner sits as far
+from the other three as they sit from each other, while for 0x4a it sits about
+twice as far, which is what makes 0x4a a triangle. 0x38 has the same packet size
+as 0x4a and only 8 instances in the known levels, too few to tell, so it is read
+as a triangle -- a wrong fourth corner is visible rubbish, a missing one only
+costs a face.
+
+`0x4a` is the most common mode in character models and `0x64`, which is not
+geometry, dominates static world geometry. Reading 0x4a as a quad therefore
+leaves world geometry looking correct while scrambling every character.
 
 A quad's four corners are stored the PSX way, as two triangles sharing an edge
 (0,1,2 and 1,2,3), so they have to be walked 0,1,3,2 to give a loop rather than
-a bowtie. Across the known levels that ordering gives the shorter perimeter for
-7748 quads against 3622 for the stored order.
-
-Mode 0x64 appears only in objects that have no vertices at all, so whatever it
-draws, it is not geometry.
+a bowtie.
 
 The rest of each packet is not worked out. A 0x3c packet carries three RGB
-triples, which is consistent with a gouraud triangle, and the textured modes
-carry what look like per-vertex UV pairs, but none of that is confirmed.
+triples, consistent with a gouraud triangle, and the textured modes carry what
+look like per-vertex UV pairs, but none of that is confirmed.
 
 ### How Good Is The Result
 
-Faces decoded this way never reference a vertex outside the record, across 5644
-of them. The geometry is coherent rather than exact: 2.6% of faces are
-degenerate, and decoded edges are 2.5 times shorter at the median than random
-vertex picks from the same model would give. That is consistent with the
-indices being right, but it is not the byte-exact confirmation the container and
-the vertex stride have.
+Faces decoded this way never reference a vertex outside the record, across
+12548 of them, and under 1% are degenerate. Their edges run about a twentieth of
+the model's diagonal at the median, against a fifth for random vertex picks from
+the same model. That is consistent with the indices being right, but it is not
+the byte-exact confirmation the container and the vertex stride have.
+
+175 of the 185 model records walk their primitives exactly. The other 10 lose
+their place part way through an object; whatever decoded before that is still
+sound and is kept.
 
 ## Other Assets
 
