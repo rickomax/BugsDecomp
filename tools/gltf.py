@@ -66,8 +66,13 @@ class Builder:
             "accessors": [],
             "bufferViews": [],
             "animations": [],
+            "samplers": [],
+            "images": [],
+            "textures": [],
+            "materials": [],
         }
         self.blob = bytearray()
+        self._material_of = {}
 
     def _view(self, data, target=None):
         # bufferView offsets must sit on a four-byte boundary
@@ -115,11 +120,48 @@ class Builder:
         self.json["accessors"].append(accessor)
         return len(self.json["accessors"]) - 1
 
+    def material(self, name, png):
+        """Adds a material over a PNG, once per distinct image.
+
+        The game's textures are palettized pixel art, so they are sampled
+        NEAREST, and a transparent-black texel means cut out, which is what
+        MASK does. Faces are visible from both sides, as they are on the PSX.
+        """
+
+        if name in self._material_of:
+            return self._material_of[name]
+        if not self.json["samplers"]:
+            self.json["samplers"].append({
+                "magFilter": 9728, "minFilter": 9728,  # NEAREST
+            })
+        self.json["images"].append({
+            "name": name,
+            "mimeType": "image/png",
+            "bufferView": self._view(png),
+        })
+        self.json["textures"].append({
+            "sampler": 0,
+            "source": len(self.json["images"]) - 1,
+        })
+        self.json["materials"].append({
+            "name": name,
+            "pbrMetallicRoughness": {
+                "baseColorTexture": {"index": len(self.json["textures"]) - 1},
+                "metallicFactor": 0.0,
+            },
+            "alphaMode": "MASK",
+            "doubleSided": True,
+        })
+        index = len(self.json["materials"]) - 1
+        self._material_of[name] = index
+        return index
+
     def to_glb(self):
         """Serializes everything into a .glb image."""
 
         self.json["buffers"] = [{"byteLength": len(self.blob)}]
-        for key in ("meshes", "animations", "accessors", "bufferViews"):
+        for key in ("meshes", "animations", "accessors", "bufferViews",
+                    "samplers", "images", "textures", "materials"):
             if not self.json[key]:
                 del self.json[key]
 
@@ -174,21 +216,24 @@ def quaternion(rotation):
 
 
 def part_geometry(model, obj, size, y_up=True):
-    """Returns (positions, uvs, colours, triangle indices) for one object.
+    """Returns (positions, uvs, colours, {texture: triangle indices}).
 
     UVs and colours belong to a face's corner rather than to a vertex, so the
     geometry comes back with a vertex per corner; see `tmd.object_geometry`.
-    glTF only draws triangles, so each face's loop is fanned here.
+    glTF only draws triangles, so each face's loop is fanned here, and a
+    material belongs to a primitive, so the triangles come grouped by texture
+    index -- None for the untextured ones.
     """
 
-    positions, uvs, colours, loops = tmd.object_geometry(
+    positions, uvs, colours, loops, textures = tmd.object_geometry(
         model, obj, size, y_up=y_up)
 
-    indices = []
-    for loop in loops:
+    indices = {}
+    for loop, texture in zip(loops, textures):
+        into = indices.setdefault(texture, [])
         # fan the loop, which for a triangle is just the triangle
         for i in range(1, len(loop) - 1):
-            indices += [loop[0], loop[i], loop[i + 1]]
+            into += [loop[0], loop[i], loop[i + 1]]
     return positions, uvs, colours, indices
 
 
@@ -198,7 +243,7 @@ def part_geometry(model, obj, size, y_up=True):
 
 
 def build(model, size, parents, node_objects, anims, name="model",
-          y_up=True):
+          y_up=True, textures=None):
     """Builds a .glb image for one model and its animations.
 
     `parents` and `node_objects` come from a TOD's `skeleton`; `anims` is a
@@ -208,6 +253,11 @@ def build(model, size, parents, node_objects, anims, name="model",
     With `y_up`, the scene hangs off one extra node holding the half turn
     that takes the game's axes to glTF's. Doing it with a node rather than by
     moving the data means the animations come along without being touched.
+
+    `textures` maps a texture index -- the level's registration number that
+    each face carries -- to that texture as PNG bytes. Each one a face names
+    becomes an embedded image and a material; faces naming one the mapping
+    does not cover, or no texture at all, go out without a material.
     """
 
     builder = Builder()
@@ -236,9 +286,9 @@ def build(model, size, parents, node_objects, anims, name="model",
     for node, obj_index in sorted(node_objects.items()):
         if not 0 <= obj_index < len(model.objects):
             continue
-        positions, uvs, colours, indices = part_geometry(
+        positions, uvs, colours, by_texture = part_geometry(
             model, model.objects[obj_index], size, False)
-        if not positions or not indices:
+        if not positions or not by_texture:
             continue
         component = (UNSIGNED_INT if len(positions) > 0xFFFF
                      else UNSIGNED_SHORT)
@@ -252,14 +302,23 @@ def build(model, size, parents, node_objects, anims, name="model",
         if colours:
             attributes["COLOR_0"] = builder.accessor(colours, "VEC4", FLOAT,
                                                      ARRAY_BUFFER)
+        # a material belongs to a primitive, so an object using several
+        # textures becomes several primitives over the same attributes
+        primitives = []
+        for texture in sorted(by_texture, key=lambda t: (t is None, t)):
+            primitive = {
+                "attributes": attributes,
+                "indices": builder.accessor(by_texture[texture], "SCALAR",
+                                            component, ELEMENT_ARRAY_BUFFER),
+                "mode": TRIANGLES,
+            }
+            if textures and texture in textures:
+                primitive["material"] = builder.material(
+                    "tex_%03d" % texture, textures[texture])
+            primitives.append(primitive)
         builder.json["meshes"].append({
             "name": "%s_obj%02d" % (name, obj_index),
-            "primitives": [{
-                "attributes": attributes,
-                "indices": builder.accessor(indices, "SCALAR", component,
-                                            ELEMENT_ARRAY_BUFFER),
-                "mode": TRIANGLES,
-            }],
+            "primitives": primitives,
         })
         mesh_of[node] = len(builder.json["meshes"]) - 1
 
@@ -352,10 +411,11 @@ def animation_tracks(builder, anim, index_of):
 
 
 def write_glb(path, model, size, parents, node_objects, anims, name="model",
-              y_up=True):
+              y_up=True, textures=None):
     """Writes one model and its animations to `path`."""
 
-    image = build(model, size, parents, node_objects, anims, name, y_up)
+    image = build(model, size, parents, node_objects, anims, name, y_up,
+                  textures)
     with open(path, "wb") as fp:
         fp.write(image)
     return image

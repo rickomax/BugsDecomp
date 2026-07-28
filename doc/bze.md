@@ -462,9 +462,22 @@ This tag includes the asset ID, which is how entities reference them.
 
 ## Type 0x29
 
+This chunk registers the level's textures; see "Texture Indices" below.
+
 | tag  | length |
 |------|--------|
 | 0x2a | 8      |
+
+### Tag 0x2a
+
+Loads one TIM from the active asset section and registers it under an index
+(`sub_422a20`). The indices are one-based and mostly dense, and they are what
+a model's textured faces refer to.
+
+| offset | type  | usage                                    |
+|--------|-------|------------------------------------------|
+| 0      | int   | offset of the TIM in the asset section   |
+| 4      | int   | index the texture is known by from then on |
 
 ## Type 0x36
 
@@ -746,42 +759,63 @@ that this is the one part of the model format decided by a measurement rather
 than by the data saying so -- the PSX draws both sides, so nothing in the file
 has to be consistent about it.
 
-### UVs, Colours And Texture Pages
+### UVs, Colours And Texture Indices
 
-The rest of a packet is a UV and a colour per corner, plus a texture page and a
-CLUT for the whole face:
+The rest of a packet is a UV and a colour per corner, plus a texture index and
+draw flags for the whole face. The two shorts sit where the PSX TMD format
+puts the CLUT and the texture page, but the PC port keeps no VRAM, so what
+they hold is not what a PSX would put there:
 
-| mode | UV bytes (u,v)              | CLUT | page | colour bytes  |
-|------|-----------------------------|------|------|---------------|
-| 0x38 | 4,5 8,9 12,13               | 6    | 10   | 16            |
-| 0x3c | 4,5 8,9 12,13               | 6    | 10   | 16 20 24      |
-| 0x40 | 4,5 8,9 12,13 14,15         | 6    | 10   | 16 20 24 28   |
-| 0x4a | --                          | --   | --   | 8 12 16       |
-| 0x4e | --                          | --   | --   | 8 12 16 20    |
+| mode | UV bytes (u,v)              | texture | flags | colour bytes  |
+|------|-----------------------------|---------|-------|---------------|
+| 0x38 | 4,5 8,9 12,13               | 6       | 10    | 16            |
+| 0x3c | 4,5 8,9 12,13               | 6       | 10    | 16 20 24      |
+| 0x40 | 4,5 8,9 12,13 14,15         | 6       | 10    | 16 20 24 28   |
+| 0x4a | --                          | --      | --    | 8 12 16       |
+| 0x4e | --                          | --      | --    | 8 12 16 20    |
 
 A colour is three bytes, RGB. `0x38` gives one colour to the whole face and the
 rest give one per corner, which matches flat against gouraud shading; `0x4a` and
 `0x4e` are exactly 8 bytes shorter than the textured triangle and quad above
-them, the 8 bytes being the UVs, the CLUT and the page.
+them, the 8 bytes being the UVs, the texture and the flags.
 
-What separates a UV byte from anything else in the packet is how it varies. A
-texture page is constant across an object, because an object *is* a material
-group, so the slot holding it changes between the faces of one object in only
-1-4% of objects. Every slot named as a UV above changes in 84-96% of them. Those
-two figures do not overlap, which is what settles the assignment. The colours
-back it up separately: `0x38` faces are grey (r=g=b) in every instance, `0x4a`
-in two thirds, and the gouraud modes in about two fifths -- far more grey than
-arbitrary bytes would give, and the pattern shading data has.
+The **texture** short is an index into the level's texture registrations, made
+by chunk type 0x29 in section 1: each 0x2a tag loads one TIM from the asset
+section and gives it a one-based index (`sub_422a20` stores that index in
+front of the TIM's own bytes). At draw time the index picks a slot in a
+48-byte-per-entry table at `0x52fd60` holding the texture's GL state
+(`sub_41b2f0` binds it, and `sub_423f30` is the pass that walks a model's
+packets exactly as above, ORing each face's blend mode into its texture's
+entry). Every index the known levels' models carry resolves to a
+registration, and the picks are coherent -- a character's head object and its
+two ear objects pick three consecutively-registered 64x64 pages.
 
-A UV is a byte offset into a 256-wide texture page, so the exporters divide by
-256. OBJ runs V up the image where a texture page runs it down, so `vt` lines
-carry `1 - v`; glTF agrees with the page and is left alone.
+The **flags** short keeps only the bits of a PSX texture page that are not an
+address: bits 7-8 are the colour depth and 5-6 the semi-transparency mode
+(`0x0080`, `0x00a0`, `0x00e0` are the values that occur -- 8bpp with blend
+mode 0, 1, 3). The page-address bits are always zero.
+
+A UV is *normalized*: 0-255 spans the whole texture regardless of its size, so
+the exporters divide by 256 and every texture's UVs run 0-1. That is measured,
+not assumed -- every textured object's UVs run to 255 whether its texture is
+16x16 or 64x128. OBJ runs V up the image where the game runs it down, so `vt`
+lines carry `1 - v`; glTF agrees with the game and is left alone.
+
+How the fields were told apart before the code confirmed them: within an
+object, the flags short changes between faces in only 1-4% of objects while
+every UV slot changes in 84-96%, and those two figures do not overlap. The
+colours back it up separately: `0x38` faces are grey (r=g=b) in every
+instance, `0x4a` in two thirds, and the gouraud modes in about two fifths --
+far more grey than arbitrary bytes would give, and the pattern shading data
+has.
 
 ### Objects Are Material Groups
 
-An object is not a body part. Every packet of an object carries the same
-texture page, and different objects of one record carry different ones, so the
-objects divide a model by material rather than by shape. Their faces draw from
+An object is not a body part. Every packet of an object carries the same draw
+flags, nearly every one the same texture index, and different objects of one
+record carry different ones, so the objects divide a model by material rather
+than by shape. (A few objects do mix two or three textures, which is why the
+exporters group faces by texture within an object rather than assuming one.) Their faces draw from
 one vertex pool shared across the record, which is why an object's vertices
 turn up in several separate stretches of it rather than one block, and why
 faces of one object reach for vertices that another object also names.
@@ -902,6 +936,14 @@ colour rides on the `v` line as three extra numbers (`v x y z r g b`), which
 Blender and MeshLab read, and which a reader that does not understand it will
 ignore; texture coordinates go out as `vt` lines with `f v/vt` faces. In glTF
 they are the `COLOR_0` and `TEXCOORD_0` attributes.
+
+The textures come along as real materials, through the registration indices
+described under "UVs, Colours And Texture Indices". The OBJ writers put one
+`.mtl` and the referenced textures as PNGs (`<stem>_tex_NNN.png`) beside the
+models, with a `usemtl` per face run; the glTF writer embeds the PNGs in the
+`.glb` and splits an object that mixes textures into one primitive per
+texture, sampled NEAREST with alpha-masking, since transparent black is the
+TIM cut-out colour.
 
 `--gltf` writes a glTF 2.0 binary (`.glb`) per model instead, carrying the node
 tree, one mesh per object, and every animation of that model. The mapping is

@@ -477,7 +477,7 @@ def _face_loop(face):
 
 
 def object_geometry(model, obj, size, transforms=None, y_up=True):
-    """Returns (positions, uvs, colours, loops) for one object.
+    """Returns (positions, uvs, colours, loops, textures) for one object.
 
     A UV and a colour belong to a corner of a face rather than to a vertex, so
     two faces meeting at a vertex rarely agree about either. The only way to
@@ -487,22 +487,25 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
 
     `colours` is always filled in, with white where a primitive carries none.
     `uvs` is empty unless something in the object is textured, since a UV
-    means nothing without a texture to look it up in.
+    means nothing without a texture to look it up in. `textures` gives each
+    loop's texture index -- the packet field the PSX would call a CLUT, which
+    this port reads as an index into the level's texture registrations -- or
+    None where a face has no texture.
     """
 
     try:
         faces = model.object_faces(obj, size)
     except TmdError:
-        return [], [], [], []
+        return [], [], [], [], []
     if not faces:
-        return [], [], [], []
+        return [], [], [], [], []
 
     world = None
     if transforms:
         index = next((i for i, o in enumerate(model.objects) if o is obj), None)
         world = transforms.get(index)
     lookup = model.object_vertex_map(obj, world)
-    positions, uvs, colours, loops = [], [], [], []
+    positions, uvs, colours, loops, textures = [], [], [], [], []
     textured = any(face.uvs for face in faces)
 
     for face in faces:
@@ -525,13 +528,21 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
             else:
                 colours.append((1.0, 1.0, 1.0, 1.0))
         loops.append(loop)
+        textures.append(face.clut if face.uvs else None)
 
     if y_up:
         positions = to_y_up(positions)
-    return positions, uvs, colours, loops
+    return positions, uvs, colours, loops, textures
 
 
-def _write_obj_part(fp, positions, uvs, colours, loops, base, flip_v=True):
+def material_name(texture):
+    """The OBJ material name for a texture index; None means untextured."""
+
+    return "flat" if texture is None else "tex_%03d" % texture
+
+
+def _write_obj_part(fp, positions, uvs, colours, loops, base, textures=None,
+                    use_materials=False, flip_v=True):
     """Writes one object's geometry, with `base` vertices already written."""
 
     for (x, y, z), colour in zip(positions, colours):
@@ -541,7 +552,13 @@ def _write_obj_part(fp, positions, uvs, colours, loops, base, flip_v=True):
     for u, v in uvs:
         # OBJ has V running up the image, the other way from a texture page
         fp.write("vt %g %g\n" % (u, 1.0 - v if flip_v else v))
-    for loop in loops:
+    current = object()  # so the first face always names its material
+    for which, loop in enumerate(loops):
+        if use_materials and textures:
+            texture = textures[which]
+            if texture != current:
+                fp.write("usemtl %s\n" % material_name(texture))
+                current = texture
         corners = []
         for i in loop:
             n = base + i + 1  # OBJ counts from 1
@@ -549,18 +566,23 @@ def _write_obj_part(fp, positions, uvs, colours, loops, base, flip_v=True):
         fp.write("f %s\n" % " ".join(corners))
 
 
-def write_obj(path, model, size, name="model", transforms=None, y_up=True):
+def write_obj(path, model, size, name="model", transforms=None, y_up=True,
+              mtllib=None):
     """Writes a model out as a Wavefront OBJ.
 
     Each object becomes its own group, so a viewer can show them apart.
     `transforms` poses the model; see `Tmd.all_vertices`. Vertices are not
     shared between faces, for the reason given in `object_geometry`.
+    `mtllib` names a material library to reference; with one, each face run
+    gets a `usemtl` for its texture (see `material_name`).
     """
 
     total_verts = total_faces = 0
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, from a BBLiT model record\n" % name)
+        if mtllib:
+            fp.write("mtllib %s\n" % mtllib)
         fp.write("o %s\n" % name)
         for i, obj in enumerate(model.objects):
             try:
@@ -569,19 +591,20 @@ def write_obj(path, model, size, name="model", transforms=None, y_up=True):
                 # keep the objects that do walk
                 fp.write("# object %d: %s\n" % (i, err))
                 continue
-            positions, uvs, colours, loops = object_geometry(
+            positions, uvs, colours, loops, textures = object_geometry(
                 model, obj, size, transforms, y_up)
             if not loops:
                 continue
             fp.write("g %s_obj%02d\n" % (name, i))
-            _write_obj_part(fp, positions, uvs, colours, loops, total_verts)
+            _write_obj_part(fp, positions, uvs, colours, loops, total_verts,
+                            textures, use_materials=bool(mtllib))
             total_verts += len(positions)
             total_faces += len(loops)
     return total_verts, total_faces
 
 
 def write_object_obj(path, model, obj, size, name="object", transforms=None,
-                     y_up=True):
+                     y_up=True, mtllib=None):
     """Writes one object of a record as an OBJ of its own.
 
     Each file is self-contained, which is what makes it useful for telling a
@@ -589,7 +612,7 @@ def write_object_obj(path, model, obj, size, name="object", transforms=None,
     vertices written, so that a record which will not walk shows something.
     """
 
-    positions, uvs, colours, loops = object_geometry(
+    positions, uvs, colours, loops, textures = object_geometry(
         model, obj, size, transforms, y_up)
 
     if not loops:
@@ -608,9 +631,32 @@ def write_object_obj(path, model, obj, size, name="object", transforms=None,
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, one object of a BBLiT model record\n" % name)
+        if mtllib:
+            fp.write("mtllib %s\n" % mtllib)
         fp.write("o %s\n" % name)
-        _write_obj_part(fp, positions, uvs, colours, loops, 0)
+        _write_obj_part(fp, positions, uvs, colours, loops, 0, textures,
+                        use_materials=bool(mtllib))
     return len(positions), len(loops)
+
+
+def write_mtl(path, textures, image_of):
+    """Writes the material library the OBJ writers reference.
+
+    `textures` is the texture indices to cover and `image_of` maps an index to
+    its image's file name, relative to the OBJ; an index it does not cover
+    still gets a material, just one without a map. The `flat` material for
+    untextured faces is always included.
+    """
+
+    with open(path, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write("# materials for the BBLiT models alongside this file\n")
+        fp.write("newmtl %s\n" % material_name(None))
+        fp.write("Kd 1 1 1\n")
+        for texture in sorted(textures):
+            fp.write("newmtl %s\n" % material_name(texture))
+            fp.write("Kd 1 1 1\n")
+            if texture in image_of:
+                fp.write("map_Kd %s\n" % image_of[texture])
 
 
 def main(argv=None):

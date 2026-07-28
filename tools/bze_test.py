@@ -635,9 +635,11 @@ def test_surface():
 
     # every corner gets a vertex of its own, since neither a UV nor a colour
     # is shared between the faces that meet at one
-    positions, uvs, colours, loops = tmd.object_geometry(
+    positions, uvs, colours, loops, textures = tmd.object_geometry(
         model, model.objects[0], len(record), y_up=False)
     check(loops == [[0, 1, 2, 3]], "the loop came out as %r" % (loops,))
+    check(textures == [0x5678],
+          "a textured face should carry its texture index: %r" % (textures,))
     check(len(positions) == 4 and len(uvs) == 4 and len(colours) == 4,
           "the per-corner arrays are %d/%d/%d long"
           % (len(positions), len(uvs), len(colours)))
@@ -650,9 +652,11 @@ def test_surface():
 
     # an untextured primitive still gets colours, but no UVs to go with them
     plain = tmd.parse(make_tmd_with_quad())
-    _p, plain_uvs, plain_colours, _l = tmd.object_geometry(
+    _p, plain_uvs, plain_colours, _l, plain_tex = tmd.object_geometry(
         plain, plain.objects[0], len(make_tmd_with_quad()), y_up=False)
     check(plain_uvs == [], "an untextured face produced UVs: %r" % (plain_uvs,))
+    check(plain_tex == [None],
+          "an untextured face should carry no texture index: %r" % (plain_tex,))
     check(len(plain_colours) == 4,
           "expected 4 colours, got %d" % len(plain_colours))
 
@@ -685,6 +689,44 @@ def test_surface():
     check("g quad_obj00" in body, "the whole-model writer wrote no group")
     check("f 1/1 2/2 3/3 4/4" in body,
           "the whole-model writer did not number from 1")
+    check("usemtl" not in body,
+          "materials should only be written when an mtllib is given")
+
+    # with a material library, a face run names its texture's material
+    tmd.write_obj(path, model, len(record), "quad", y_up=False,
+                  mtllib="quad.mtl")
+    body = open(path, encoding="utf-8").read()
+    check("mtllib quad.mtl" in body, "the OBJ does not reference its mtl")
+    check("usemtl tex_%03d" % 0x5678 in body,
+          "the face run does not name its texture's material")
+    mtl_path = os.path.join(os.path.dirname(path), "quad.mtl")
+    tmd.write_mtl(mtl_path, [7], {7: "tex_007.png"})
+    mtl = open(mtl_path, encoding="utf-8").read()
+    check("newmtl flat" in mtl, "the mtl lacks the untextured material")
+    check("newmtl tex_007" in mtl and "map_Kd tex_007.png" in mtl,
+          "the mtl does not map texture 7 to its image")
+
+    # glTF: the texture becomes an embedded image and a material on the mesh
+    fake_png = tim.encode_png(2, 2, [(255, 0, 0, 255)] * 4)
+    image = gltf.build(model, len(record), {}, {0: 0}, [],
+                       "test", textures={0x5678: fake_png})
+    import json as json_mod
+    pos = 12
+    doc = None
+    while pos < len(image):
+        length, kind = struct.unpack_from("<II", image, pos)
+        pos += 8
+        if kind == 0x4E4F534A:
+            doc = json_mod.loads(image[pos:pos + length])
+        pos += length
+    check(len(doc.get("images", [])) == 1,
+          "expected one embedded image, got %r" % doc.get("images"))
+    check(doc["materials"][0]["name"] == "tex_%03d" % 0x5678,
+          "the material is %r" % doc["materials"][0])
+    prim = doc["meshes"][0]["primitives"][0]
+    check(prim.get("material") == 0,
+          "the primitive does not use the material: %r" % prim)
+    check(fake_png in image, "the PNG bytes are not embedded in the blob")
 
 
 def test_gltf():

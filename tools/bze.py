@@ -645,6 +645,47 @@ def find_assets(bze):
     return ident, data, groups
 
 
+def texture_registry(bze):
+    """Maps each texture index to its TIM image.
+
+    Chunk type 0x29's 0x2a tags are the level's texture registrations: 8
+    bytes each, an offset into an asset section and the index the texture is
+    known by from then on (`sub_422a20`). That index is what a textured
+    primitive carries in the field the PSX format would use for a CLUT -- the
+    PC port keeps no VRAM, so the field selects a whole texture instead.
+
+    The offsets do not say which section they index, so the sections are
+    tried until one holds a TIM at every offset. Returns {index: Tim}, empty
+    when nothing registers.
+    """
+
+    sections = {s.ident: s for s in bze.sections}
+    if 1 not in sections:
+        return {}
+    chunks, _terminated = parse_chunks(decompress(bze.raw(sections[1])))
+
+    registrations = []
+    for chunk in chunks:
+        if chunk.kind != 0x29:
+            continue
+        for tag, payload in chunk.tags:
+            if tag == 0x2A and len(payload) == 8:
+                registrations.append(struct.unpack("<II", payload))
+    if not registrations:
+        return {}
+
+    for section in bze.sections:
+        if section.ident == 1:
+            continue
+        data = decompress(bze.raw(section))
+        try:
+            return {index: tim.parse(data, offset)
+                    for offset, index in registrations}
+        except tim.TimError:
+            continue
+    return {}
+
+
 def skeleton_of(anims):
     """Merges the skeleton every animation of a model carries.
 
@@ -706,6 +747,51 @@ def cmd_models(args):
         os.makedirs(args.outdir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(args.file))[0]
 
+    # each face names its texture by registration index; see texture_registry
+    registry = {} if args.list or args.raw else texture_registry(bze)
+    png_of = {}     # texture index -> PNG bytes, decoded once
+    mtllib = None   # the .mtl next to the OBJs, written on first use
+
+    def png_for(index):
+        if index not in png_of and index in registry:
+            png_of[index] = tim.png_bytes(registry[index])
+        return png_of.get(index)
+
+    def textures_used(model, size):
+        used = set()
+        for obj in model.objects:
+            try:
+                faces = model.object_faces(obj, size)
+            except tmd.TmdError:
+                continue
+            used |= {f.clut for f in faces if f.uvs and f.clut in registry}
+        return used
+
+    def obj_materials(model, size):
+        """Ensures the PNGs and .mtl the OBJs need, returning the mtl name.
+
+        The library and images cover every archive's model at once, and are
+        written the first time any model asks for them.
+        """
+
+        nonlocal mtllib
+        if not textures_used(model, size):
+            return None
+        if mtllib is None:
+            # the file names carry the archive's stem, because two archives'
+            # textures share an index space but not their content
+            image_of = {}
+            for _o, s, m in models:
+                for index in textures_used(m, s):
+                    image_of[index] = "%s_tex_%03d.png" % (stem, index)
+            for index, filename in sorted(image_of.items()):
+                with open(os.path.join(args.outdir, filename), "wb") as fp:
+                    fp.write(png_for(index))
+            mtllib = stem + ".mtl"
+            tmd.write_mtl(os.path.join(args.outdir, mtllib), registry,
+                          image_of)
+        return mtllib
+
     for i, (offset, size, model) in enumerate(models):
         transforms = None
         if getattr(args, "pose", False):
@@ -735,7 +821,8 @@ def cmd_models(args):
             path = os.path.join(args.outdir, name + ".glb")
             labels = [("anim_%06x" % o, a) for o, _s, a in groups[i][3]]
             gltf.write_glb(path, model, size, parents, node_objects, labels,
-                           name, not args.psx_axes)
+                           name, not args.psx_axes,
+                           {index: png_for(index) for index in registry})
             n_anim = sum(1 for _l, a in labels if any(
                 p.ptype == tod.PACKET_COORDINATE
                 for f in a.frames for p in f.packets))
@@ -743,16 +830,19 @@ def cmd_models(args):
                   % (path, len(model.objects), n_anim,
                      "" if n_anim == 1 else "s"))
         elif args.split:
+            materials = obj_materials(model, size)
             for k, obj in enumerate(model.objects):
                 part = "%s_obj%02d" % (name, k)
                 path = os.path.join(args.outdir, part + ".obj")
                 nv, nf = tmd.write_object_obj(path, model, obj, size, part,
-                                              transforms, not args.psx_axes)
+                                              transforms, not args.psx_axes,
+                                              materials)
                 print("%s (%d vertices, %d faces)" % (path, nv, nf))
         else:
+            materials = obj_materials(model, size)
             path = os.path.join(args.outdir, name + ".obj")
             nv, nf = tmd.write_obj(path, model, size, name, transforms,
-                                   not args.psx_axes)
+                                   not args.psx_axes, materials)
             posed = " posed" if transforms else ""
             print("%s (%d objects, %d vertices, %d faces%s)"
                   % (path, len(model.objects), nv, nf, posed))

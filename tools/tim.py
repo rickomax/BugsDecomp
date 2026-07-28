@@ -260,8 +260,8 @@ def to_rgba(image, palette_index=0):
 # ---------------------------------------------------------------------------
 
 
-def write_png(path, width, height, rgba):
-    """Writes RGBA pixels out as a PNG."""
+def encode_png(width, height, rgba):
+    """Returns RGBA pixels encoded as a PNG."""
 
     raw = bytearray()
     for row in range(height):
@@ -275,11 +275,23 @@ def write_png(path, width, height, rgba):
         return out + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
 
     header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", header)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + chunk(b"IEND", b""))
+
+
+def write_png(path, width, height, rgba):
+    """Writes RGBA pixels out as a PNG."""
+
     with open(path, "wb") as fp:
-        fp.write(b"\x89PNG\r\n\x1a\n")
-        fp.write(chunk(b"IHDR", header))
-        fp.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
-        fp.write(chunk(b"IEND", b""))
+        fp.write(encode_png(width, height, rgba))
+
+
+def png_bytes(image, palette_index=0):
+    """Decodes an image and returns it as a PNG."""
+
+    return encode_png(image.width, image.height, to_rgba(image, palette_index))
 
 
 def save(image, path, palette_index=0):

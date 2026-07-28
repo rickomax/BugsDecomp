@@ -83,6 +83,12 @@ the `v` line as three extra numbers (`v x y z r g b`) -- Blender and MeshLab
 read it, anything else ignores it -- and the texture coordinates go out as `vt`
 with `f v/vt` faces. In glTF they are `COLOR_0` and `TEXCOORD_0`.
 
+Textures come along too: each face carries an index into the level's texture
+registrations, so the OBJ writers drop a `<stem>.mtl` plus the referenced
+textures as `<stem>_tex_NNN.png` beside the models, and the glTF writer embeds
+the PNGs in the `.glb` as materials. Nothing needs switching on; models that
+use no registered texture simply get no material.
+
 ### anims
 
 Lists each model's TOD animations, grouped under the model they belong to:
