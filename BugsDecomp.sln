@@ -26,6 +26,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{B7C2F9A4
 		tools\check_recon.py = tools\check_recon.py
 		tools\tim.py = tools\tim.py
 		tools\tmd.py = tools\tmd.py
+		tools\tod.py = tools\tod.py
 		tools\recon.py = tools\recon.py
 	EndProjectSection
 EndProject

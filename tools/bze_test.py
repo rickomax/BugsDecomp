@@ -25,6 +25,7 @@ import sys
 import bze
 import tim
 import tmd
+import tod
 
 
 # ---------------------------------------------------------------------------
@@ -486,6 +487,69 @@ def test_tmd():
         FAILURES.append("%s was accepted as a model" % what)
 
 
+def make_tod(frames, resolution=1):
+    """Builds an animation from [(frame number, [packets])]."""
+
+    out = struct.pack("<BBH I", tod.TOD_ID, 0, resolution, len(frames))[:8]
+    out = struct.pack("<BBHI", tod.TOD_ID, 0, resolution, len(frames))
+    for number, packets in frames:
+        body = b""
+        for node, ptype, flag, payload in packets:
+            length = 1 + len(payload) // 4
+            body += struct.pack("<HBB", node, (flag << 4) | ptype, length)
+            body += payload
+        out += struct.pack("<HHI", len(body) // 4 + 2, len(packets), number)
+        out += body
+    return out
+
+
+def test_tod():
+    """Header, frames, the coordinate layout, and the skeleton."""
+
+    rot = struct.pack("<4h", 1024, 0, 0, 0)          # a quarter turn about X
+    scale = struct.pack("<4h", 0x1000, 0x1000, 0x1000, 0)
+    trans = struct.pack("<3i", 100, 200, 300)
+    setup = make_tod([(0, [
+        (1, tod.PACKET_TMD_ID, 0, struct.pack("<HH", 1, 0)),
+        (2, tod.PACKET_TMD_ID, 0, struct.pack("<HH", 2, 0)),
+        (2, tod.PACKET_PARENT, 0, struct.pack("<HH", 1, 0)),
+    ])])
+    anim = make_tod([(0, [
+        (1, tod.PACKET_COORDINATE, 0xE, rot + scale + trans),
+        (2, tod.PACKET_COORDINATE, 0x8, trans),
+    ])], resolution=2)
+
+    parsed = tod.parse(setup, 0, len(setup))
+    parents, objects = parsed.skeleton()
+    check(parents == {2: 1}, "parents came out as %r" % parents)
+    check(objects == {1: 0, 2: 1},
+          "one-based model IDs were not shifted down: %r" % objects)
+
+    parsed = tod.parse(anim, 0, len(anim))
+    pose = parsed.pose(0)
+    check(pose[1][0] == (1024, 0, 0) and pose[1][2] == (100, 200, 300),
+          "the coordinate packet decoded as %r" % (pose[1],))
+    check(pose[2][0] == (0, 0, 0),
+          "a translation-only packet should rotate by nothing")
+
+    # node 2 hangs off node 1: a quarter turn about X takes its +Y translation
+    # to +Z, on top of the parent's own translation
+    world = tod.world_transforms(parents, pose)
+    _m, t = world[2]
+    check([round(c) for c in t] == [200, -100, 500],
+          "the child landed at %r, expected [200, -100, 500]" % (t,))
+
+    for bad, what in (
+        (b"\x51" + setup[1:], "a bad id"),
+        (setup[:-4], "a truncated frame"),
+    ):
+        try:
+            tod.parse(bad, 0, len(bad))
+        except tod.TodError:
+            continue
+        FAILURES.append("%s was accepted as a TOD" % what)
+
+
 def test_bad_input():
     """Damaged files should be reported, not silently accepted."""
 
@@ -516,6 +580,7 @@ def main():
         test_chunk_walk,
         test_tim,
         test_tmd,
+        test_tod,
         test_container,
         test_bad_input,
     ):

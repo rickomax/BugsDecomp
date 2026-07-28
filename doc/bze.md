@@ -776,12 +776,56 @@ whatever decoded before that is kept.
 It only ever appears in objects that have no vertices, so it is unlikely to be
 geometry, but what it does draw is unknown.
 
-## Other Assets
+## Animations (TOD)
 
-Tag `0x25` of chunk type `0x22` names records that are neither TMD nor HMD.
-They start with a `short` of 0x50, a `short` of 1 or 2, a count, and a
-width/height pair; the loader (the `0x25` case of v1.0 0x42e910) reads a
-count from +2, halves it, and keeps a pointer to +8. What they hold is unknown.
+Tag `0x25` of chunk type `0x22` names **TOD** files, the PSX SDK's hierarchy
+and motion format (file id 0x50). As with the models, the shell is the PSX
+layout and one field was converted for the PC: a coordinate packet's rotation
+is three shorts and a pad rather than three longs. Frames chain to the byte in
+every record of the known levels, and all 225k coordinate packets agree with
+the flag/length rule, so the layout is certain.
+
+A model's animations follow it: the chunk that loads a model is followed by the
+chunks that load its TODs, until the next model chunk.
+
+Header (8 bytes): file id 0x50, version byte, `short` resolution (frame time in
+60ths of a second), `int` frame count. Each frame: `short` size in longs
+(including this header), `short` packet count, `int` frame number. Each packet:
+`short` node ID, a byte holding the packet type (low nibble) and flag (high
+nibble), and a byte length in longs (including the header).
+
+Packet types seen in the data:
+
+| type | usage                | notes                                        |
+|------|----------------------|----------------------------------------------|
+| 1    | coordinate           | flag bits: 2 rotation, 4 scale, 8 translation |
+| 2    | model object mapping | `short`, **one-based** index into the object table |
+| 3    | parent node          | `short` node ID                              |
+| 8    | object control       | flag 0xb; not decoded                        |
+| 9    | non-standard         | node 0 of most frames; looks like a pair of world positions |
+| 10   | non-standard         | rare; not decoded                            |
+
+A coordinate packet carries, in order, whichever of these its flag names:
+rotation as three Q12 shorts and a pad (0x1000 is a full turn), scale as three
+Q12 shorts and a pad, translation as three `int`s in world units.
+
+### Skeleton And Placement
+
+TMD objects sit at the origin in their own local spaces; the TOD is what
+places them, which is the usual PSX arrangement. The single-frame
+`resolution=1` TOD accompanying each model is its *setup*: type-2 packets map
+each node to a model object and type-3 packets name each node's parent. The
+bind pose is the full set of coordinate packets in frame 0 of a gameplay
+animation (typically flag 0xe, all three components). A node's coordinates
+are local to its parent, so placing the model means composing them down the
+tree -- the `GsCOORDINATE2` hierarchy the game builds at runtime.
+
+The proof the chain is right is the model's own seams: seam-flagged duplicate
+vertices sit in different objects, and under the composed bind pose each lands
+on its twin (median error ~2 world units, against ~34 unposed).
+
+The rest of a gameplay animation is rotation-only differential frames
+animating the limbs; playing them back is not implemented.
 
 # Reading BZE Files
 
@@ -793,7 +837,8 @@ section 1.
     python3 tools/bze.py extract <file.bze> -o <outdir>
     python3 tools/bze.py chunks <file.bze> [-s]
     python3 tools/bze.py textures <file.bze> -o <outdir>
-    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split]
+    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split] [--pose]
+    python3 tools/bze.py anims <file.bze>
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
 on despite a bad checksum or inconsistent header.
@@ -808,7 +853,10 @@ each ending on its `2f` terminator with nothing left over.
 a Wavefront OBJ with faces, or the record itself with `--raw`. A model's objects
 become OBJ groups, and `--split` puts each object in a file of its own, taking
 whichever vertices its faces name and renumbering them so the file stands alone
--- which is the way to tell an object that decoded well from one that did not. The two
+-- which is the way to tell an object that decoded well from one that did not.
+`--pose` places each model's objects using its skeleton and bind pose from the
+TOD animations, and `anims` lists them; the TOD format itself is readable on
+its own through `tools/tod.py`. The two
 formats are also readable on their own, through `tools/tim.py` and
 `tools/tmd.py`.
 

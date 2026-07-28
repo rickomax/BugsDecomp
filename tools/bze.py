@@ -32,6 +32,7 @@ import sys
 
 import tim
 import tmd
+import tod
 
 
 # size of the header, and of the sector each section is padded out to
@@ -594,38 +595,96 @@ def find_models(bze):
     models were loaded from, so the two have to be read together.
     """
 
+    ident, data, groups = find_assets(bze)
+    return ident, data, [(o, s, m) for o, s, m, _anims in groups]
+
+
+def find_assets(bze):
+    """Locates the models and pairs each with its animations.
+
+    A model's animations follow it: the chunk that loads a model is followed
+    by the chunks that load its animation records, until the next model. The
+    animations are TOD files; see `tools/tod.py`.
+
+    Returns (section ident, section data,
+             [(offset, size, model, [(offset, size, tod)])]).
+    """
+
     sections = {s.ident: s for s in bze.sections}
     if 1 not in sections:
         raise BzeError("no section 1, so nothing says where the models are")
 
     chunks, _terminated = parse_chunks(decompress(bze.raw(sections[1])))
-    wanted = []
-    for chunk in chunks:
-        for tag, payload in chunk.tags:
-            if (chunk.kind, tag) in MODEL_TAGS and len(payload) >= 8:
-                wanted.append(struct.unpack_from("<II", payload, 0))
-
-    # the models sit in the highest-numbered section, which is the one the
-    # loader makes active for model data
     ident = max(sections)
     data = decompress(bze.raw(sections[ident]))
 
-    found = []
-    for offset, size in sorted(set(wanted)):
-        if offset + size > len(data) or not tmd.looks_like_tmd(data, offset):
-            continue
-        found.append((offset, size, tmd.parse(data, offset)))
-    return ident, data, found
+    groups = []
+    seen = set()
+    for chunk in chunks:
+        for tag, payload in chunk.tags:
+            if len(payload) < 8:
+                continue
+            offset, size = struct.unpack_from("<II", payload, 0)
+            if offset + size > len(data) or (offset, size) in seen:
+                continue
+            if (chunk.kind, tag) in MODEL_TAGS:
+                if not tmd.looks_like_tmd(data, offset):
+                    continue
+                seen.add((offset, size))
+                groups.append((offset, size, tmd.parse(data, offset), []))
+            elif (chunk.kind, tag) == (0x22, 0x25) and groups:
+                try:
+                    anim = tod.parse(data, offset, size)
+                except tod.TodError:
+                    continue
+                seen.add((offset, size))
+                groups[-1][3].append((offset, size, anim))
+    # keep the long-standing numbering: records sort by offset
+    groups.sort(key=lambda g: g[0])
+    return ident, data, groups
+
+
+def bind_transforms(model, anims):
+    """Builds each object's world transform from a model's animations.
+
+    The skeleton (parents, and one-based model object IDs) comes from
+    whichever animation carries it -- the single-frame setup TOD -- and the
+    bind pose is frame 0 of whichever animation poses the most nodes.
+
+    Returns {object table index: (matrix, translation)}, empty when the model
+    has no skeleton to pose it.
+    """
+
+    parents = {}
+    objects = {}
+    pose = {}
+    for _offset, _size, anim in anims:
+        got_parents, got_objects = anim.skeleton()
+        parents.update(got_parents)
+        objects.update(got_objects)
+        candidate = anim.pose(0)
+        if len(candidate) > len(pose):
+            pose = candidate
+
+    if not objects or not pose:
+        return {}
+    world = tod.world_transforms(parents, pose)
+    return {
+        obj_index: world[node]
+        for node, obj_index in objects.items()
+        if node in world and 0 <= obj_index < len(model.objects)
+    }
 
 
 def cmd_models(args):
     bze = Bze(read_file(args.file))
     report_problems(bze, args)
 
-    ident, data, models = find_models(bze)
-    if not models:
+    ident, data, groups = find_assets(bze)
+    if not groups:
         print("no model records found", file=sys.stderr)
         return 1
+    models = [(o, s, m) for o, s, m, _anims in groups]
 
     print("section %d: %d model record%s"
           % (ident, len(models), "" if len(models) == 1 else "s"))
@@ -635,6 +694,9 @@ def cmd_models(args):
     stem = os.path.splitext(os.path.basename(args.file))[0]
 
     for i, (offset, size, model) in enumerate(models):
+        transforms = None
+        if getattr(args, "pose", False):
+            transforms = bind_transforms(model, groups[i][3]) or None
         verts = sum(o.n_vert for o in model.objects)
         prims = sum(o.n_prim for o in model.objects)
         if args.list:
@@ -656,13 +718,44 @@ def cmd_models(args):
             for k, obj in enumerate(model.objects):
                 part = "%s_obj%02d" % (name, k)
                 path = os.path.join(args.outdir, part + ".obj")
-                nv, nf = tmd.write_object_obj(path, model, obj, size, part)
+                nv, nf = tmd.write_object_obj(path, model, obj, size, part,
+                                              transforms)
                 print("%s (%d vertices, %d faces)" % (path, nv, nf))
         else:
             path = os.path.join(args.outdir, name + ".obj")
-            nv, nf = tmd.write_obj(path, model, size, name)
-            print("%s (%d objects, %d vertices, %d faces)"
-                  % (path, len(model.objects), nv, nf))
+            nv, nf = tmd.write_obj(path, model, size, name, transforms)
+            posed = " posed" if transforms else ""
+            print("%s (%d objects, %d vertices, %d faces%s)"
+                  % (path, len(model.objects), nv, nf, posed))
+    return 0
+
+
+def cmd_anims(args):
+    bze = Bze(read_file(args.file))
+    report_problems(bze, args)
+
+    _ident, _data, groups = find_assets(bze)
+    shown = 0
+    for offset, _size, model, anims in groups:
+        if not anims:
+            continue
+        shown += 1
+        print("model 0x%06x (%d objects):" % (offset, len(model.objects)))
+        for aoffset, _asize, anim in anims:
+            parents, objects = anim.skeleton()
+            posed = len(anim.pose(0))
+            note = []
+            if parents:
+                note.append("skeleton (%d nodes)" % len(parents))
+            if posed:
+                note.append("%d posed nodes" % posed)
+            print("  0x%06x  %4d frame%s  res %d%s"
+                  % (aoffset, len(anim.frames),
+                     "" if len(anim.frames) == 1 else "s", anim.resolution,
+                     ("  " + ", ".join(note)) if note else ""))
+    if not shown:
+        print("no animated models found", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -730,6 +823,13 @@ def main(argv=None):
     p_mod.add_argument("--split", action="store_true",
                        help="write one OBJ per object of each model, so a bad "
                             "object can be told from a good one")
+    p_mod.add_argument("--pose", action="store_true",
+                       help="place each model's objects using its skeleton and "
+                            "bind pose from the TOD animations")
+
+    p_anim = sub.add_parser("anims", parents=[common],
+                            help="list each model's TOD animations")
+    p_anim.set_defaults(func=cmd_anims)
     p_mod.set_defaults(func=cmd_models)
 
     args = parser.parse_args(argv)

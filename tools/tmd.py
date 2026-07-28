@@ -133,7 +133,7 @@ class Tmd:
             out.append((x, y, z))
         return out
 
-    def all_vertices(self):
+    def all_vertices(self, transforms=None):
         """Returns the record's vertices, in the order primitives index them.
 
         Each vertex's fourth field says where it sits in the index space the
@@ -145,17 +145,32 @@ class Tmd:
         Some records leave the field zero throughout (the single-object world
         models). There the numbering is simply the order the vertices sit in,
         with the objects taken in vertex-area order.
+
+        `transforms` maps an object's index in the object table to a world
+        (matrix, translation) pair; each vertex is taken through its owning
+        object's transform, which is how an animation's pose places the model.
         """
 
         verts = []
         fields = []
-        for obj in sorted(self.objects, key=lambda o: o.vert_top):
+        order = sorted(range(len(self.objects)),
+                       key=lambda i: self.objects[i].vert_top)
+        for index in order:
+            obj = self.objects[index]
             start = self.base + obj.vert_top
+            world = transforms.get(index) if transforms else None
             for i in range(obj.n_vert):
                 at = start + i * VERTEX_SIZE
                 if at + VERTEX_SIZE > len(self._data):
                     raise TmdError("vertex area runs past the end of the data")
                 x, y, z, field = struct.unpack_from("<3fI", self._data, at)
+                if world:
+                    m, t = world
+                    x, y, z = (
+                        m[0][0] * x + m[0][1] * y + m[0][2] * z + t[0],
+                        m[1][0] * x + m[1][1] * y + m[1][2] * z + t[1],
+                        m[2][0] * x + m[2][1] * y + m[2][2] * z + t[2],
+                    )
                 verts.append((x, y, z))
                 fields.append(field)
 
@@ -324,15 +339,16 @@ def _face_loop(face):
     return face
 
 
-def write_obj(path, model, size, name="model"):
+def write_obj(path, model, size, name="model", transforms=None):
     """Writes a model out as a Wavefront OBJ.
 
     Vertex indices run across the whole record, so the vertices go out as one
     list and the faces index into it. Each object becomes its own group, so a
-    viewer can show them apart.
+    viewer can show them apart. `transforms` poses the model; see
+    `Tmd.all_vertices`.
     """
 
-    verts = model.all_vertices()
+    verts = model.all_vertices(transforms)
     total = 0
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
@@ -358,7 +374,7 @@ def write_obj(path, model, size, name="model"):
     return len(verts), total
 
 
-def write_object_obj(path, model, obj, size, name="object"):
+def write_object_obj(path, model, obj, size, name="object", transforms=None):
     """Writes one object of a record as an OBJ of its own.
 
     An object's faces may reach for vertices outside its own block, so this
@@ -368,7 +384,7 @@ def write_object_obj(path, model, obj, size, name="object"):
     one.
     """
 
-    verts = model.all_vertices()
+    verts = model.all_vertices(transforms)
     try:
         faces = model.object_faces(obj, size)
     except TmdError:
