@@ -774,10 +774,20 @@ they hold is not what a PSX would put there:
 | 0x4a | --                          | --      | --    | 8 12 16       |
 | 0x4e | --                          | --      | --    | 8 12 16 20    |
 
-A colour is three bytes, RGB. `0x38` gives one colour to the whole face and the
-rest give one per corner, which matches flat against gouraud shading; `0x4a` and
-`0x4e` are exactly 8 bytes shorter than the textured triangle and quad above
-them, the 8 bytes being the UVs, the texture and the flags.
+A colour is three bytes, RGB, followed by a zero pad byte. `0x38` gives one
+colour to the whole face and the rest give one per corner, which matches flat
+against gouraud shading; the untextured modes drop the UV, texture and flag
+bytes and keep the colours.
+
+A primitive never carries both a face colour and per-corner colours -- it is
+one or the other -- so an exporter has nothing to combine. The flat modes are
+written out by giving every corner of the face the same colour, which is what
+makes a single `COLOR_0` attribute enough for glTF.
+
+The colours are used as they are, not as the PSX modulation where 0x80 means
+"leave the texture alone". They spread evenly over the whole 0-255 range with
+no clustering at 128 -- 0.2-0.5% of channels sit exactly there, about what
+chance gives -- so the exporters divide by 255.
 
 The **texture** short is an index into the level's texture registrations, made
 by chunk type 0x29 in section 1: each 0x2a tag loads one TIM from the asset
@@ -952,6 +962,15 @@ models, with a `usemtl` per face run; the glTF writer embeds the PNGs in the
 `.glb` and splits an object that mixes textures into one primitive per
 texture, sampled NEAREST with alpha-masking, since transparent black is the
 TIM cut-out colour.
+
+Every glTF primitive gets a material, including the untextured ones, which
+get a plain white `flat`. This matters more than it sounds: glTF's default
+material is `metallicFactor` 1.0, and a fully metallic surface with nothing
+to reflect renders as dark grey in most viewers, which swallows `COLOR_0`
+whole -- so leaving the flat-shaded faces without a material makes them all
+come out grey no matter how good their colours are. Nothing in this game is
+metal, and every material's `baseColorFactor` is white, so the vertex colours
+and the texture reach the screen as they are.
 
 `--gltf` writes a glTF 2.0 binary (`.glb`) per model instead, carrying the node
 tree, one mesh per object, and every animation of that model. The mapping is

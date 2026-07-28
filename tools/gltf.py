@@ -120,8 +120,14 @@ class Builder:
         self.json["accessors"].append(accessor)
         return len(self.json["accessors"]) - 1
 
-    def material(self, name, png):
-        """Adds a material over a PNG, once per distinct image.
+    def material(self, name, png=None):
+        """Adds a material, once per name; `png` gives it a texture.
+
+        Every primitive needs one of these, even an untextured one. glTF's
+        default material is `metallicFactor` 1.0, and a fully metallic
+        surface lit by nothing renders as dark grey in most viewers, which
+        swallows the vertex colours whole -- so the flat-shaded faces come
+        out grey however good their COLOR_0 is. Nothing here is metal.
 
         The game's textures are palettized pixel art, so they are sampled
         NEAREST, and a transparent-black texel means cut out, which is what
@@ -130,28 +136,35 @@ class Builder:
 
         if name in self._material_of:
             return self._material_of[name]
-        if not self.json["samplers"]:
-            self.json["samplers"].append({
-                "magFilter": 9728, "minFilter": 9728,  # NEAREST
+
+        # baseColorFactor is white so that COLOR_0, and the texture if there
+        # is one, come through as they are: glTF multiplies the three
+        shading = {"baseColorFactor": [1.0, 1.0, 1.0, 1.0],
+                   "metallicFactor": 0.0,
+                   "roughnessFactor": 1.0}
+        entry = {"name": name, "doubleSided": True}
+
+        if png is not None:
+            if not self.json["samplers"]:
+                self.json["samplers"].append({
+                    "magFilter": 9728, "minFilter": 9728,  # NEAREST
+                })
+            self.json["images"].append({
+                "name": name,
+                "mimeType": "image/png",
+                "bufferView": self._view(png),
             })
-        self.json["images"].append({
-            "name": name,
-            "mimeType": "image/png",
-            "bufferView": self._view(png),
-        })
-        self.json["textures"].append({
-            "sampler": 0,
-            "source": len(self.json["images"]) - 1,
-        })
-        self.json["materials"].append({
-            "name": name,
-            "pbrMetallicRoughness": {
-                "baseColorTexture": {"index": len(self.json["textures"]) - 1},
-                "metallicFactor": 0.0,
-            },
-            "alphaMode": "MASK",
-            "doubleSided": True,
-        })
+            self.json["textures"].append({
+                "sampler": 0,
+                "source": len(self.json["images"]) - 1,
+            })
+            shading["baseColorTexture"] = {
+                "index": len(self.json["textures"]) - 1,
+            }
+            entry["alphaMode"] = "MASK"
+
+        entry["pbrMetallicRoughness"] = shading
+        self.json["materials"].append(entry)
         index = len(self.json["materials"]) - 1
         self._material_of[name] = index
         return index
@@ -315,6 +328,10 @@ def build(model, size, parents, node_objects, anims, name="model",
             if textures and texture in textures:
                 primitive["material"] = builder.material(
                     "tex_%03d" % texture, textures[texture])
+            else:
+                # still a material, so the viewer does not fall back to the
+                # metallic default and grey out the vertex colours
+                primitive["material"] = builder.material("flat")
             primitives.append(primitive)
         builder.json["meshes"].append({
             "name": "%s_obj%02d" % (name, obj_index),

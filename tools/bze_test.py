@@ -732,6 +732,28 @@ def test_surface():
           "the primitive does not use the material: %r" % prim)
     check(fake_png in image, "the PNG bytes are not embedded in the blob")
 
+    # every primitive must carry a material, textured or not: glTF's default
+    # is metallicFactor 1.0, which renders dark grey and hides COLOR_0
+    plain_record = make_tmd_with_quad()
+    plain = tmd.parse(plain_record)
+    bare = gltf.build(plain, len(plain_record), {}, {0: 0}, [], "test")
+    pos, doc = 12, None
+    while pos < len(bare):
+        length, kind = struct.unpack_from("<II", bare, pos)
+        pos += 8
+        if kind == 0x4E4F534A:
+            doc = json_mod.loads(bare[pos:pos + length])
+        pos += length
+    prims = [p for m in doc["meshes"] for p in m["primitives"]]
+    check(prims and all("material" in p for p in prims),
+          "an untextured primitive was left without a material")
+    for mat in doc["materials"]:
+        shading = mat["pbrMetallicRoughness"]
+        check(shading["metallicFactor"] == 0.0,
+              "material %r is metallic: %r" % (mat["name"], shading))
+        check(shading.get("baseColorFactor") == [1.0, 1.0, 1.0, 1.0],
+              "material %r tints COLOR_0: %r" % (mat["name"], shading))
+
 
 def test_gltf():
     """A built glb must be well formed and place its meshes correctly."""
