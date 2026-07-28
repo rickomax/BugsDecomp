@@ -3,18 +3,19 @@
 """
 Checks `bze.py` against the game's own decompressor.
 
-There is no BZE in this repository to test against, so this leans on two things
-instead:
+No level is checked into this repository, so this works on generated data:
 
 - a transcription of the game's decompression loop, kept as close to the
   pseudocode as Python allows -- down to the 16-bit counters that wrap. It is
   unreadable on purpose; the point is that it was copied rather than
   understood, so if `bze.py` misreads the format the two disagree.
 - streams built item by item, over every combination of the options the format
-  allows, including runs that overlap themselves.
+  allows, including runs that overlap themselves and the two ways a section can
+  end early.
 
-This says nothing about whether the format documentation matches real files.
-Only a real level can settle that.
+The reader has separately been run over the 10 known levels, where every header
+checksum matched and every section 1 walked cleanly to its terminator. That is
+the check that says the format is right; this one says the code stays that way.
 """
 
 import random
@@ -263,6 +264,87 @@ def test_container():
               "section %d did not decompress to what it held" % i)
 
 
+def test_stored_count_one_too_many():
+    """A section whose stored count is exact, not one short.
+
+    The compressor emitted both, mixed together, so a reader has to cope with
+    the item too many. There is nothing left for it to read, so it stops.
+    """
+
+    rng = random.Random(11)
+    stream, expected = make_stream(rng, 3, 1, 200)
+    # rewrite the header so the stored count is the real one; the decompressor
+    # will then reach for a 201st item that was never written
+    stored = 200
+    overrun = bytes([stream[0], (stored >> 16) & 0xFF, (stored >> 8) & 0xFF,
+                     stored & 0xFF]) + stream[4:]
+
+    out, done, total, _left = bze.decompress_verbose(overrun)
+    check(out == expected,
+          "an exact stored count gave %d bytes, expected %d"
+          % (len(out), len(expected)))
+    check(done == 200 and total == 201,
+          "expected to stop after 200 of 201 items, stopped after %d of %d"
+          % (done, total))
+
+
+def test_zero_displacement_ends_it():
+    """A back reference reaching zero bytes back is padding, not data."""
+
+    rng = random.Random(12)
+    stream, expected = make_stream(rng, 3, 1, 200)
+    # give the item too many something to read: a group flagging a back
+    # reference, whose packed value is zero
+    stored = 200
+    overrun = bytes([stream[0], (stored >> 16) & 0xFF, (stored >> 8) & 0xFF,
+                     stored & 0xFF]) + stream[4:] + bytes([0x00, 0x00, 0x00])
+
+    out, done, _total, _left = bze.decompress_verbose(overrun)
+    check(out == expected,
+          "a zero displacement gave %d bytes, expected %d"
+          % (len(out), len(expected)))
+    check(done == 200, "stopped after %d items, expected 200" % done)
+
+
+def test_chunk_walk():
+    """The section 1 walker should agree with what it was handed."""
+
+    stream = bytes([bze.CHUNK_START, 0x20])
+    stream += bytes([0x21]) + bytes(4)
+    stream += bytes([0x10]) + bytes(12)
+    stream += bytes([bze.CHUNK_END])
+    stream += bytes([0x2C])
+    stream += bytes([bze.CHUNK_START, 0x29]) + bytes([0x2A]) + bytes(8)
+    stream += bytes([bze.CHUNK_END, bze.SECTION_END])
+
+    chunks, terminated = bze.parse_chunks(stream)
+    check(terminated, "a terminated stream was not seen as terminated")
+    check([c.kind for c in chunks] == [0x20, 0x2C, 0x29],
+          "walked %r" % [c.kind for c in chunks])
+    check([t for t, _ in chunks[0].tags] == [0x21, 0x10],
+          "chunk 0x20 gave tags %r" % [t for t, _ in chunks[0].tags])
+
+    # a stream opening `2d 45` has no type byte
+    pseudo = bytes([bze.CHUNK_START, 0x45, 0x00, 0x45, 0x00, bze.CHUNK_END,
+                    bze.SECTION_END])
+    chunks, terminated = bze.parse_chunks(pseudo)
+    check(terminated and len(chunks) == 1 and chunks[0].kind is None,
+          "the pseudo-chunk was not recognized")
+    check(len(chunks[0].tags) == 2,
+          "pseudo-chunk gave %d tags, expected 2" % len(chunks[0].tags))
+
+    for bad, what in (
+        (bytes([bze.CHUNK_START, 0xFE, bze.CHUNK_END]), "an unknown type"),
+        (bytes([bze.CHUNK_START, 0x29, 0x99, bze.CHUNK_END]), "an unknown tag"),
+        (bytes([0x99]), "a stray byte where a chunk should be"),
+    ):
+        try:
+            bze.parse_chunks(bad)
+        except bze.BzeError:
+            continue
+        FAILURES.append("%s was accepted" % what)
+
+
 def test_bad_input():
     """Damaged files should be reported, not silently accepted."""
 
@@ -288,6 +370,9 @@ def main():
         test_length_lut,
         test_against_transcription,
         test_overlapping_runs,
+        test_stored_count_one_too_many,
+        test_zero_displacement_ends_it,
+        test_chunk_walk,
         test_container,
         test_bad_input,
     ):

@@ -15,10 +15,14 @@ Usage:
     bze.py list <file.bze>
     bze.py extract <file.bze> [-o outdir] [--raw]
 
-Note the same container turns up in other Behaviour titles (Jersey Devil uses
-8-byte entries with no ID and stores its sections uncompressed; Monsters Inc.
-uses a 12-byte header), so a reader written against this one will not
-necessarily read those.
+This has been run over the 10 known levels: every header checksum matched and
+every section 1 walked cleanly to its terminator, so the format as documented
+here is right.
+
+Note the same compression turns up in other Behaviour titles under a `.bzz`
+extension, wrapped in slightly different archive headers -- Jersey Devil,
+Monsters Inc. and The Grinch. Their compressed streams should read the same;
+the container in this file will not read them.
 """
 
 import argparse
@@ -32,6 +36,40 @@ HEADER_SIZE = 0x800
 SECTOR_SIZE = 0x800
 # the header checksum covers everything before it
 CHECKSUM_OFFSET = 0x7FC
+
+# Section 1 is a stream of chunks describing how to build the level. These are
+# the tags each chunk type takes and how many bytes follow each one, from
+# `doc/bze.md`; a chunk runs to a 0x2e, the stream to a 0x2f.
+CHUNK_END = 0x2E
+SECTION_END = 0x2F
+CHUNK_START = 0x2D
+# top-level commands that stand alone, taking no operand
+COMMANDS = (0x2C, 0x4B)
+
+# tags shared by the entity chunk types
+_ENTITY_TAGS = {
+    0x0B: 4, 0x0C: 4, 0x0F: 2, 0x10: 12, 0x11: 6, 0x12: 12, 0x13: 1, 0x15: 1,
+    0x16: 8, 0x17: 36, 0x18: 16, 0x19: 4, 0x1A: 4, 0x1B: 6, 0x1C: 8, 0x1D: 4,
+    0x1E: 2, 0x1F: 1, 0x27: 4, 0x30: 32, 0x31: 32, 0x32: 12, 0x34: 24,
+    0x35: 40, 0x38: 2, 0x39: 2, 0x3A: 4, 0x41: 20, 0x42: 6, 0x46: 2,
+}
+
+CHUNK_TAGS = {
+    0x00: {0x01: 8, 0x02: 8, 0x04: 8, 0x44: 12, 0x4C: 48, 0x4D: 48},
+    0x05: {0x06: 3},
+    0x07: _ENTITY_TAGS,
+    0x08: _ENTITY_TAGS,
+    0x09: {0x10: 12, 0x11: 6, 0x16: 8, 0x1C: 8, 0x1F: 1, 0x33: 32},
+    0x0A: _ENTITY_TAGS,
+    0x20: {0x10: 12, 0x11: 6, 0x12: 12, 0x21: 4, 0x24: 8, 0x39: 2, 0x43: 1},
+    0x22: {0x0D: 12, 0x24: 8, 0x25: 8, 0x26: 4, 0x27: 4, 0x28: 3, 0x3F: 12,
+           0x40: 8},
+    0x29: {0x2A: 8},
+    0x36: {0x37: 8},
+    0x3B: {0x2B: 12, 0x3C: 4, 0x3D: 6, 0x3E: 28},
+    0x47: {0x48: 8},
+    0x49: {0x4A: 48},
+}
 
 # what each section ID is known to hold
 SECTION_NAMES = {
@@ -167,6 +205,90 @@ def round_up(value, to):
 
 
 # ---------------------------------------------------------------------------
+# section 1
+# ---------------------------------------------------------------------------
+
+
+class Chunk:
+    """One chunk of a section 1 stream, or a standalone command."""
+
+    def __init__(self, offset, kind, tags=None):
+        self.offset = offset
+        # chunk type, or the command byte for a standalone command
+        self.kind = kind
+        # [(tag, payload)], empty for a command
+        self.tags = tags or []
+
+
+def parse_chunks(data):
+    """Walks a decompressed section 1.
+
+    Every tag has a fixed length, so the stream can only be walked by knowing
+    all of them. That makes this a strict check on the decompression as much as
+    a reader: get a byte wrong anywhere and the walk desynchronizes at once.
+
+    Returns ([chunks], commands seen, whether it ended where it should).
+    """
+
+    chunks = []
+    pos = 0
+
+    # a stream may open with a chunk that has no type byte, whose only tag is
+    # 0x45; each one makes the game skip a section of the level
+    if data[:2] == bytes([CHUNK_START, 0x45]):
+        pos = 1
+        chunk = Chunk(0, None)
+        while pos < len(data) and data[pos] != CHUNK_END:
+            if data[pos] != 0x45:
+                raise BzeError(
+                    "pseudo-chunk holds tag 0x%02x at 0x%x, only 0x45 is valid"
+                    % (data[pos], pos)
+                )
+            chunk.tags.append((0x45, data[pos + 1:pos + 2]))
+            pos += 2
+        chunks.append(chunk)
+        pos += 1
+
+    while pos < len(data):
+        start = pos
+        byte = data[pos]
+
+        if byte == SECTION_END:
+            return chunks, pos + 1 == len(data)
+        if byte in COMMANDS:
+            chunks.append(Chunk(start, byte))
+            pos += 1
+            continue
+        if byte != CHUNK_START:
+            raise BzeError(
+                "expected a chunk at 0x%x, found 0x%02x" % (pos, byte)
+            )
+
+        kind = data[pos + 1]
+        pos += 2
+        if kind not in CHUNK_TAGS:
+            raise BzeError("unknown chunk type 0x%02x at 0x%x" % (kind, start))
+
+        tags = CHUNK_TAGS[kind]
+        chunk = Chunk(start, kind)
+        while pos < len(data) and data[pos] != CHUNK_END:
+            tag = data[pos]
+            if tag not in tags:
+                raise BzeError(
+                    "chunk type 0x%02x holds unknown tag 0x%02x at 0x%x"
+                    % (kind, tag, pos)
+                )
+            size = tags[tag]
+            chunk.tags.append((tag, data[pos + 1:pos + 1 + size]))
+            pos += 1 + size
+        chunks.append(chunk)
+        pos += 1
+
+    # ran off the end without a terminator
+    return chunks, False
+
+
+# ---------------------------------------------------------------------------
 # decompression
 # ---------------------------------------------------------------------------
 
@@ -225,41 +347,59 @@ def build_length_lut(length_size, step):
 
 
 def decompress(data):
-    """Decompresses a section.
+    """Decompresses a section."""
+
+    return decompress_verbose(data)[0]
+
+
+def decompress_verbose(data):
+    """Decompresses a section, reporting how it went.
 
     Items come in groups of eight, each group prefixed by a byte saying what
     its items are: a set bit means a literal byte, a clear one a back
     reference. The item count runs out mid-group as often as not, which ends
     the whole thing.
+
+    The stored item count is usually one short of the real one, but for some
+    sections it is exact, and nothing in the header says which. The game does
+    not care: it decompresses out of a buffer larger than the section, so the
+    item too many reads a couple of bytes of whatever follows and appends a
+    short run of rubbish past the end of the real output, which no caller looks
+    at. Running out of input is therefore the end of the section, not an error.
+
+    Returns (data, items done, items the header called for, input left over).
     """
 
-    offset_size, length_size, lut, remaining = parse_compression_header(data)
+    _offset_size, length_size, lut, total = parse_compression_header(data)
     length_mask = (1 << length_size) - 1
 
     out = bytearray()
     pos = 4
-    while remaining > 0:
-        if pos >= len(data):
-            raise BzeError("ran out of input with %d items to go" % remaining)
+    done = 0
+    while done < total and pos < len(data):
         flags = data[pos]
         pos += 1
 
         for i in range(8):
-            if pos >= len(data):
-                raise BzeError("ran out of input part way through a group")
+            literal = flags & (1 << i)
+            # stop rather than run off the end; see above
+            if pos + (0 if literal else 1) >= len(data):
+                return bytes(out), done, total, len(data) - pos
 
-            if flags & (1 << i):
+            if literal:
                 out.append(data[pos])
                 pos += 1
             else:
-                if pos + 1 >= len(data):
-                    raise BzeError("back reference is cut short")
                 packed = (data[pos] << 8) | data[pos + 1]
                 pos += 2
 
                 offset = packed >> length_size
                 length = lut[packed & length_mask]
-                if offset == 0 or offset > len(out):
+                if offset == 0:
+                    # no back reference reaches zero bytes back, so this is the
+                    # item too many reading padding; drop it
+                    return bytes(out), done, total, len(data) - pos
+                if offset > len(out):
                     raise BzeError(
                         "back reference reaches %d bytes back, past the %d "
                         "decompressed so far" % (offset, len(out))
@@ -270,11 +410,11 @@ def decompress(data):
                 for k in range(length):
                     out.append(out[start + k])
 
-            remaining -= 1
-            if remaining == 0:
+            done += 1
+            if done == total:
                 break
 
-    return bytes(out)
+    return bytes(out), done, total, len(data) - pos
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +430,16 @@ def cmd_list(args):
     print()
     print("  # |  ID | name              |   offset |  size (packed) |   unpacked")
     print("----|-----|-------------------|----------|----------------|-----------")
+    short = False
     for section in bze.sections:
         unpacked = "-"
         if not args.raw:
             try:
-                unpacked = "%d" % len(decompress(bze.raw(section)))
+                blob, done, total, _left = decompress_verbose(bze.raw(section))
+                unpacked = "%d" % len(blob)
+                if done != total:
+                    unpacked += " (-%d)" % (total - done)
+                    short = True
             except BzeError as err:
                 unpacked = "failed: %s" % err
         print(
@@ -302,6 +447,11 @@ def cmd_list(args):
             % (section.index, section.ident, section.name, section.offset,
                section.size, unpacked)
         )
+
+    if short:
+        print()
+        print("(-N) marks sections whose stored item count was one too many; "
+              "see doc/bze.md.")
 
     report_problems(bze, args)
     return 0
@@ -337,6 +487,49 @@ def cmd_extract(args):
             fp.write(blob)
         print("%s (%d bytes)" % (path, len(blob)))
 
+    return 0
+
+
+def cmd_chunks(args):
+    bze = Bze(read_file(args.file))
+    report_problems(bze, args)
+
+    wanted = [s for s in bze.sections if s.ident == 1]
+    if not wanted:
+        print("no section 1 in this file", file=sys.stderr)
+        return 1
+
+    for section in wanted:
+        data = decompress(bze.raw(section))
+        chunks, terminated = parse_chunks(data)
+
+        print("section %d: %d bytes, %d chunks%s"
+              % (section.index, len(data), len(chunks),
+                 "" if terminated else ", NOT properly terminated"))
+        if args.summary:
+            counts = {}
+            for chunk in chunks:
+                key = ("command 0x%02x" % chunk.kind if chunk.kind in COMMANDS
+                       else "pseudo-chunk" if chunk.kind is None
+                       else "type 0x%02x" % chunk.kind)
+                counts[key] = counts.get(key, 0) + 1
+            for key in sorted(counts):
+                print("  %-14s %4d" % (key, counts[key]))
+            continue
+
+        for chunk in chunks:
+            if chunk.kind is None:
+                print("  0x%06x  pseudo-chunk (%d tags)"
+                      % (chunk.offset, len(chunk.tags)))
+            elif chunk.kind in COMMANDS:
+                print("  0x%06x  command 0x%02x" % (chunk.offset, chunk.kind))
+            else:
+                print("  0x%06x  chunk type 0x%02x" % (chunk.offset, chunk.kind))
+                for tag, payload in chunk.tags:
+                    print("              tag 0x%02x  %s"
+                          % (tag, payload.hex(" ")))
+        if not terminated:
+            return 1
     return 0
 
 
@@ -382,6 +575,12 @@ def main(argv=None):
     p_extract.add_argument("-o", "--outdir", default=".",
                            help="where to write the sections (default: .)")
     p_extract.set_defaults(func=cmd_extract)
+
+    p_chunks = sub.add_parser("chunks", parents=[common],
+                              help="walk the load instructions in section 1")
+    p_chunks.add_argument("-s", "--summary", action="store_true",
+                          help="count chunks by type instead of listing them")
+    p_chunks.set_defaults(func=cmd_chunks)
 
     args = parser.parse_args(argv)
     try:

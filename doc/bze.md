@@ -68,20 +68,36 @@ offset/length pairs as well as the step size for the length lookup table (LUT):
 
 Note that an `osize` of 7 is not valid (since no lengths could be encoded).
 
+In practice every section of every known level uses `0b`, i.e. 12-bit offsets
+with 4-bit lengths and a step of 1. The other combinations are implemented by
+the game but appear to go unused.
+
 The remaining 3 bytes form a 24-bit big-endian integer that represents the
 number of compression "items"; the stored value is one less than the actual
 value (so there is always at least one "item").
 
-NOTE: for some sections, the stored number of items seems to be the actual
-number, i.e. it's not one less than the actual number. There currently does not
-appear to be an obvious pattern to these off-by-1 errors.
+NOTE: for some sections, the stored number of items is the actual number, i.e.
+it's not one less. There is no pattern to it, and nothing in the header says
+which kind a section is; the two are mixed within a single file. Of the 39
+sections across the 10 known levels, 7 store the exact count.
 
-The decompressor itself (v1.0 0x431160) is not where the discrepancy comes from:
-it checks the counter only after processing an item, so it always processes one
-more item than the stored value, with no path that does otherwise. The extra
-item's output presumably runs past the end of the real data, which is harmless
-as long as the result is truncated to the size the section is expected to
-decompress to.
+This is a bug in whichever compressor built the data, not something the game
+handles: its decompressor (v1.0 0x431160) checks the counter only after
+processing an item, so it always processes one item more than the stored value,
+with no path that does otherwise. It gets away with it because it decompresses
+out of a buffer larger than the section, so the item too many reads whatever
+follows in memory and appends a short run of rubbish past the end of the real
+output, which no caller looks at.
+
+A reader cannot do that, so it should stop at whichever comes first:
+
+* the stored item count plus one, as the game does
+* the end of the compressed data -- note sections are padded to a 4-byte
+boundary, so up to 3 bytes of padding may follow the last real item
+* an offset/length pair whose offset is 0, which is never a real back reference
+
+The same bug, and the same three rules, are described in nocash's notes on the
+BZZ archives of Behaviour's other titles.
 
 ## Length Encoding
 
@@ -582,16 +598,23 @@ golden carrot count, which is split across two bytes
 
 # Reading BZE Files
 
-`tools/bze.py` implements this document: it lists an archive's sections and
-extracts them, decompressing as it goes.
+`tools/bze.py` implements this document: it lists an archive's sections,
+extracts them, decompressing as it goes, and walks the load instructions in
+section 1.
 
     python3 tools/bze.py list <file.bze>
     python3 tools/bze.py extract <file.bze> -o <outdir>
+    python3 tools/bze.py chunks <file.bze> [-s]
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
 on despite a bad checksum or inconsistent header.
 
+`chunks` is the strictest check there is on all of the above. Every tag has a
+fixed length, so walking the stream is only possible if the decompression was
+byte-exact and every tag length in this document is right: one wrong byte and
+the walk desynchronizes immediately. It runs clean over all 10 known levels,
+each ending on its `2f` terminator with nothing left over.
+
 `tools/bze_test.py` checks the implementation against a transcription of the
-game's own decompression loop over every combination of the format's options. It
-does not check either against a real level, since there is none in this
-repository.
+game's own decompression loop, over every combination of the format's options.
+It uses generated data, since no level is checked into this repository.
