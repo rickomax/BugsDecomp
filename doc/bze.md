@@ -760,7 +760,7 @@ section 1.
     python3 tools/bze.py extract <file.bze> -o <outdir>
     python3 tools/bze.py chunks <file.bze> [-s]
     python3 tools/bze.py textures <file.bze> -o <outdir>
-    python3 tools/bze.py models <file.bze> -o <outdir> [--raw]
+    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split]
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
 on despite a bad checksum or inconsistent header.
@@ -772,7 +772,10 @@ the walk desynchronizes immediately. It runs clean over all 10 known levels,
 each ending on its `2f` terminator with nothing left over.
 
 `textures` writes each TIM out as a PNG, and `models` writes each model out as
-a Wavefront OBJ with faces, or the record itself with `--raw`. The two
+a Wavefront OBJ with faces, or the record itself with `--raw`. A model's objects
+become OBJ groups, and `--split` puts each object in a file of its own, taking
+whichever vertices its faces name and renumbering them so the file stands alone
+-- which is the way to tell an object that decoded well from one that did not. The two
 formats are also readable on their own, through `tools/tim.py` and
 `tools/tmd.py`.
 

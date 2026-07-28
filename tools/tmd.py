@@ -24,7 +24,7 @@ converted for the PC, though, so a stock PSX TMD reader will not read them:
 Usage:
 
     tmd.py list <file>
-    tmd.py obj <file> [-o outdir]
+    tmd.py obj <file> [-o outdir] [--split]
 """
 
 import argparse
@@ -174,17 +174,17 @@ class Tmd:
             out = []
             for obj in self.objects:
                 try:
-                    out.extend(self._object_faces(obj, size))
+                    out.extend(self.object_faces(obj, size))
                 except TmdError:
                     continue
             return out
 
         out = []
         for obj in self.objects:
-            out.extend(self._object_faces(obj, size))
+            out.extend(self.object_faces(obj, size))
         return out
 
-    def _object_faces(self, obj, size):
+    def object_faces(self, obj, size):
         """Walks one object's primitives, returning its faces."""
 
         out = []
@@ -286,31 +286,93 @@ def check(model, size):
     return problems
 
 
+def _face_loop(face):
+    """Puts a face's corners in the order a polygon wants them.
+
+    A quad is stored the PSX way, as two triangles sharing an edge (0,1,2 and
+    1,2,3), so its corners have to be walked 0,1,3,2 to come out as a loop
+    rather than a bowtie.
+    """
+
+    if len(face) == 4:
+        return (face[0], face[1], face[3], face[2])
+    return face
+
+
 def write_obj(path, model, size, name="model"):
     """Writes a model out as a Wavefront OBJ.
 
     Vertex indices run across the whole record, so the vertices go out as one
-    list and the faces index into it.
+    list and the faces index into it. Each object becomes its own group, so a
+    viewer can show them apart.
     """
 
     verts = model.all_vertices()
-    # keep whatever walks, even if one object loses its place part way
-    faces = model.faces(size, partial=True)
+    total = 0
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, from a BBLiT model record\n" % name)
         fp.write("o %s\n" % name)
         for x, y, z in verts:
             fp.write("v %g %g %g\n" % (x, y, z))
+        for i, obj in enumerate(model.objects):
+            try:
+                faces = model.object_faces(obj, size)
+            except TmdError as err:
+                # keep the objects that do walk
+                fp.write("# object %d: %s\n" % (i, err))
+                continue
+            if not faces:
+                continue
+            fp.write("g %s_obj%02d\n" % (name, i))
+            for face in faces:
+                # OBJ counts vertices from 1
+                fp.write("f %s\n"
+                         % " ".join(str(v + 1) for v in _face_loop(face)))
+            total += len(faces)
+    return len(verts), total
+
+
+def write_object_obj(path, model, obj, size, name="object"):
+    """Writes one object of a record as an OBJ of its own.
+
+    An object's faces may reach for vertices outside its own block, so this
+    takes whichever vertices its faces actually name and renumbers them. That
+    keeps each file self-contained and shows exactly what that one object
+    draws, which is what makes it useful for telling a good object from a bad
+    one.
+    """
+
+    verts = model.all_vertices()
+    try:
+        faces = model.object_faces(obj, size)
+    except TmdError:
+        faces = []
+
+    if faces:
+        used = sorted({v for face in faces for v in face})
+    else:
+        # nothing walked, so fall back to the object's own vertices
+        start = 0
+        for other in sorted(model.objects, key=lambda o: o.vert_top):
+            if other is obj:
+                break
+            start += other.n_vert
+        used = list(range(start, start + obj.n_vert))
+    renumber = {v: i for i, v in enumerate(used)}
+
+    with open(path, "w", encoding="utf-8", newline="\n") as fp:
+        fp.write("# %s, one object of a BBLiT model record\n" % name)
+        fp.write("o %s\n" % name)
+        for v in used:
+            if v < len(verts):
+                fp.write("v %g %g %g\n" % verts[v])
+            else:
+                fp.write("v 0 0 0\n")
         for face in faces:
-            # a quad is stored the PSX way, as two triangles sharing an edge
-            # (0,1,2 and 1,2,3), so its corners have to be walked 0,1,3,2 to
-            # come out as a loop rather than a bowtie
-            if len(face) == 4:
-                face = (face[0], face[1], face[3], face[2])
-            # OBJ counts vertices from 1
-            fp.write("f %s\n" % " ".join(str(i + 1) for i in face))
-    return len(verts), len(faces)
+            fp.write("f %s\n"
+                     % " ".join(str(renumber[v] + 1) for v in _face_loop(face)))
+    return len(used), len(faces)
 
 
 def main(argv=None):
@@ -324,8 +386,11 @@ def main(argv=None):
     p_list.set_defaults(func="list")
 
     p_obj = sub.add_parser("obj", parents=[common],
-                           help="write the vertices out as a Wavefront OBJ")
+                           help="write the model out as a Wavefront OBJ")
     p_obj.add_argument("-o", "--outdir", default=".")
+    p_obj.add_argument("--split", action="store_true",
+                       help="write one OBJ per object instead of one for the "
+                            "whole record")
     p_obj.set_defaults(func="obj")
 
     args = parser.parse_args(argv)
@@ -353,6 +418,14 @@ def main(argv=None):
     os.makedirs(args.outdir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(args.file))[0]
     path = os.path.join(args.outdir, stem + ".obj")
+    if args.split:
+        for i, obj in enumerate(model.objects):
+            name = "%s_obj%02d" % (stem, i)
+            part = os.path.join(args.outdir, name + ".obj")
+            nverts, nfaces = write_object_obj(part, model, obj, len(data), name)
+            print("%s (%d vertices, %d faces)" % (part, nverts, nfaces))
+        return 0
+
     nverts, nfaces = write_obj(path, model, len(data), stem)
     print("%s (%d objects, %d vertices, %d faces)"
           % (path, len(model.objects), nverts, nfaces))

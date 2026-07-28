@@ -650,11 +650,19 @@ def cmd_models(args):
             path = os.path.join(args.outdir, name + ".tmd")
             with open(path, "wb") as fp:
                 fp.write(data[offset:offset + size])
+            print("%s (%d objects, %d vertices)"
+                  % (path, len(model.objects), verts))
+        elif args.split:
+            for k, obj in enumerate(model.objects):
+                part = "%s_obj%02d" % (name, k)
+                path = os.path.join(args.outdir, part + ".obj")
+                nv, nf = tmd.write_object_obj(path, model, obj, size, part)
+                print("%s (%d vertices, %d faces)" % (path, nv, nf))
         else:
             path = os.path.join(args.outdir, name + ".obj")
-            tmd.write_obj(path, model, size, name)
-        print("%s (%d objects, %d vertices)" % (path, len(model.objects),
-                                                verts))
+            nv, nf = tmd.write_obj(path, model, size, name)
+            print("%s (%d objects, %d vertices, %d faces)"
+                  % (path, len(model.objects), nv, nf))
     return 0
 
 
@@ -719,6 +727,9 @@ def main(argv=None):
     p_mod.add_argument("-o", "--outdir", default=".")
     p_mod.add_argument("-l", "--list", action="store_true",
                        help="describe the models instead of writing them")
+    p_mod.add_argument("--split", action="store_true",
+                       help="write one OBJ per object of each model, so a bad "
+                            "object can be told from a good one")
     p_mod.set_defaults(func=cmd_models)
 
     args = parser.parse_args(argv)
