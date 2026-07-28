@@ -645,7 +645,10 @@ def test_surface():
           % (len(positions), len(uvs), len(colours)))
     check(positions[0] == (2.0, 4.0, 0.0),
           "the first corner is %r, expected vertex 2" % (positions[0],))
-    check(uvs[0] == (16 / tmd.TEXTURE_PAGE_SIZE, 144 / tmd.TEXTURE_PAGE_SIZE),
+    # the game measures V up from the bottom, so it comes out flipped into
+    # the top-left origin images use
+    check(uvs[0] == (16 / tmd.TEXTURE_PAGE_SIZE,
+                     1.0 - 144 / tmd.TEXTURE_PAGE_SIZE),
           "the first UV is %r" % (uvs[0],))
     check(colours[0] == (2 / 255.0, 4 / 255.0, 8 / 255.0, 1.0),
           "the first colour is %r" % (colours[0],))
@@ -675,8 +678,9 @@ def test_surface():
           "the colour on the first `v` line is %r" % (v_lines[0],))
     vt_lines = [l for l in lines if l.startswith("vt ")]
     check(len(vt_lines) == 4, "expected 4 `vt` lines, got %d" % len(vt_lines))
-    # OBJ runs V up the image, the other way from a texture page
-    check(vt_lines[0].split()[2] == "%g" % (1.0 - 144 / tmd.TEXTURE_PAGE_SIZE),
+    # OBJ measures V up from the bottom, the same way the game does, so it
+    # comes back to the stored byte
+    check(vt_lines[0].split()[2] == "%g" % (144 / tmd.TEXTURE_PAGE_SIZE),
           "the first V is %r" % (vt_lines[0],))
     f_lines = [l for l in lines if l.startswith("f ")]
     check(f_lines == ["f 1/1 2/2 3/3 4/4"],

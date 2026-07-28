@@ -519,7 +519,11 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
             if textured:
                 if face.uvs:
                     u, v = face.uvs[corner]
-                    uvs.append((u / TEXTURE_PAGE_SIZE, v / TEXTURE_PAGE_SIZE))
+                    # the game measures V up from the bottom of the texture,
+                    # so it is flipped into the top-left origin that images,
+                    # and with them glTF, use
+                    uvs.append((u / TEXTURE_PAGE_SIZE,
+                                1.0 - v / TEXTURE_PAGE_SIZE))
                 else:
                     uvs.append((0.0, 0.0))
             if face.colours:
@@ -550,7 +554,8 @@ def _write_obj_part(fp, positions, uvs, colours, loops, base, textures=None,
         fp.write("v %g %g %g %g %g %g\n"
                  % (x, y, z, colour[0], colour[1], colour[2]))
     for u, v in uvs:
-        # OBJ has V running up the image, the other way from a texture page
+        # OBJ measures V up from the bottom, the other way from the top-left
+        # origin object_geometry hands out
         fp.write("vt %g %g\n" % (u, 1.0 - v if flip_v else v))
     current = object()  # so the first face always names its material
     for which, loop in enumerate(loops):

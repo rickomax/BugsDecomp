@@ -798,8 +798,16 @@ mode 0, 1, 3). The page-address bits are always zero.
 A UV is *normalized*: 0-255 spans the whole texture regardless of its size, so
 the exporters divide by 256 and every texture's UVs run 0-1. That is measured,
 not assumed -- every textured object's UVs run to 255 whether its texture is
-16x16 or 64x128. OBJ runs V up the image where the game runs it down, so `vt`
-lines carry `1 - v`; glTF agrees with the game and is left alone.
+16x16 or 64x128.
+
+V is measured up from the bottom of the texture. That is the opposite of what
+the software rasterizer's span loop suggests, where the texel address is
+`base + (V >> 16 << shift) + (U >> 16)` and so V=0 would be the first stored
+row; whatever flips it happens between the packet and that loop. It was
+settled by looking at exported models in a viewer, not from the code. The
+practical consequence: glTF, whose origin is the top-left, needs `1 - v`,
+while OBJ measures V up from the bottom as the game does and takes it as it
+comes.
 
 How the fields were told apart before the code confirmed them: within an
 object, the flags short changes between faces in only 1-4% of objects while
