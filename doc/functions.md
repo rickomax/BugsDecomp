@@ -72,10 +72,10 @@ game versions, including PSX (US):
 | `SaveAltConfig`       | 0x409ce0     | 0x409c80     |             | port  | cfg      | yes         |
 | `LoadAltConfig`       | 0x409d00     | 0x409ca0     |             | port  | cfg      | yes         |
 | `ReadConfig`          | 0x409d20     | 0x409cc0     |             | port  | cfg      | yes         |
-| `GsSetProjection`     | 0x40cd80     | 0x40cd20     | 0x80055afc  | sdk   | gs       | no          |
-| `GsMapModelingData`   | 0x40cdc0     | 0x40cd60     | 0x80055a8c  | sdk   | gs       | no          |
-| `GsInitCoordinate2`   | 0x40ce90     | 0x40ce30     | 0x800551ac  | sdk   | gs       | no          |
-| `GsSetRefView2L`      | 0x40cf10     | 0x40ceb0     | 0x8005661c  | sdk   | gs       | no          |
+| `GsSetProjection`     | 0x40cd80     | 0x40cd20     | 0x80055afc  | sdk   | gs       | yes         |
+| `GsMapModelingData`   | 0x40cdc0     | 0x40cd60     | 0x80055a8c  | sdk   | gs       | yes         |
+| `GsInitCoordinate2`   | 0x40ce90     | 0x40ce30     | 0x800551ac  | sdk   | gs       | yes         |
+| `GsSetRefView2L`      | 0x40cf10     | 0x40ceb0     | 0x8005661c  | sdk   | gs       | yes         |
 | `SetGLPixelFormat`    | 0x40df80     | 0x40df20     |             | port  | rogl     | yes         |
 | `TestGL`              | 0x40e0b0     | 0x40e050     |             | port  | rogl     | yes         |
 | `UnloadGL`            | 0x40e210     | 0x40e1b0     |             | port  | rogl     | yes         |

@@ -289,6 +289,44 @@ The BZE file format is detailed [here](bze.md).
 
 More details about (known) functions can be found [here](functions.md).
 
+# PSX SDK Layer
+
+BBLiT on PC is a port of the PSX game, and its SDK layer kept the PSX API: the
+`sdk` functions in [functions.md](functions.md) are PsyQ routines (`libgte`,
+`libgs`, `libpad`), rewritten for x86 rather than recompiled. Their behaviour is
+not always faithful to the PSX originals -- `SquareRoot0` is a plain `sqrt`,
+`ratan2` a plain `atan2`, and `GsSetRefView2L` ignores the twist and coordinate
+system of the view it is given -- so the PSX documentation describes the
+intended API, not what the port does.
+
+Structure layouts, on the other hand, did carry over, and can be checked against
+the game's own code. `GsInitCoordinate2` writes exactly the fields of a PsyQ
+`GsCOORDINATE2` at exactly its offsets, and `GsMapModelingData` walks a TMD's
+28-byte object entries as the format specifies.
+
+The [Psy-Cross](https://github.com/OpenDriver2/PsyCross) project (the PSX
+runtime used by [REDRIVER2](https://github.com/OpenDriver2/REDRIVER2)) is a
+useful reference for these APIs. Note it covers `libgte`, `libgpu`, `libpad`,
+`libetc`, `libspu`, `libcd`, `libapi` and `libmath`, but not `libgs`, which is
+what most of the game's remaining SDK code belongs to.
+
+## Unidentified SDK Code
+
+The functions from 0x409e90 to 0x40cce0 (v1.0) sit immediately before the known
+`libgs` entry points and appear to be the rest of `libgs`. Two are strong
+candidates, both walking the `GsCOORDINATE2` parent chain and composing each
+node's transform into its `workm`, which is what the PsyQ local-matrix routines
+do:
+
+| v1.0 addr | candidate  | notes                                            |
+|-----------|------------|--------------------------------------------------|
+| 0x40a0b0  | `GsGetLs`  | applies the view matrix, giving a screen transform |
+| 0x40a1b0  | `GsGetLw`  | stops at the world transform                      |
+
+Both take a work buffer the PSX versions keep internally, so they are port
+variants rather than the SDK functions as documented. Neither has been confirmed
+and neither is in [functions.md](functions.md) yet.
+
 # Original Source Layout
 
 The game was built from `D:\Projets\Bugs\src\` on the developers' machines. Two

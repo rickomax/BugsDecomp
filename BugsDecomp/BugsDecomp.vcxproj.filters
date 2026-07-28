@@ -39,6 +39,9 @@
     <ClCompile Include="fs.c">
       <Filter>Source Files\Bugs</Filter>
     </ClCompile>
+    <ClCompile Include="gs.c">
+      <Filter>Source Files\Bugs</Filter>
+    </ClCompile>
     <ClCompile Include="gte.c">
       <Filter>Source Files\Bugs</Filter>
     </ClCompile>
@@ -87,6 +90,9 @@
       <Filter>Header Files\Bugs</Filter>
     </ClInclude>
     <ClInclude Include="fs.h">
+      <Filter>Header Files\Bugs</Filter>
+    </ClInclude>
+    <ClInclude Include="gs.h">
       <Filter>Header Files\Bugs</Filter>
     </ClInclude>
     <ClInclude Include="gte.h">
