@@ -757,6 +757,21 @@ def test_surface():
           "the primitive does not use the material: %r" % prim)
     check(fake_png in image, "the PNG bytes are not embedded in the blob")
 
+    # COLOR_0 is defined to be linear, while the game's shades and swatches
+    # are display-space: handing sRGB over untouched washes everything out
+    check(abs(gltf.srgb_to_linear(148 / 255.0) - 0.2961) < 1e-3,
+          "srgb_to_linear(148) gave %r" % gltf.srgb_to_linear(148 / 255.0))
+    check(gltf.srgb_to_linear(0.0) == 0.0 and gltf.srgb_to_linear(1.0) == 1.0,
+          "the conversion must fix both ends of the range")
+    _p, _u2, raw_cols, _l, _t = tmd.object_geometry(
+        model, model.objects[0], len(record), y_up=False)
+    _p, _u3, lin_cols, _i2 = gltf.part_geometry(
+        model, model.objects[0], len(record), y_up=False)
+    check(lin_cols[0][0] == gltf.srgb_to_linear(raw_cols[0][0]),
+          "part_geometry did not linearize COLOR_0: %r vs %r"
+          % (lin_cols[0], raw_cols[0]))
+    check(lin_cols[0][3] == 1.0, "alpha must not be linearized")
+
     # every primitive must carry a material, textured or not: glTF's default
     # is metallicFactor 1.0, which renders dark grey and hides COLOR_0
     plain_record = make_tmd_with_quad()

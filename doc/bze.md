@@ -975,6 +975,15 @@ baked into the exported colour instead -- `shade / 128 * swatch`, per corner
 -- and they go out as untextured faces under the `flat` material. Nothing is
 lost by it, since a swatch has no detail to sample, only the one colour.
 
+One conversion separates the two formats here. glTF defines `COLOR_0` as
+linear, and multiplies it into a base colour texture that is sRGB-encoded and
+converted on the way in, so the glTF writer takes the colours into linear
+space. The game's shades and swatches are display-space, and handing them
+over untouched makes everything far too bright -- a mid flesh tone of 148
+reaches the screen at about 200, which washes a face out to near-white. OBJ
+needs no such conversion: its vertex colours carry no declared space, and the
+tools that read them treat them as sRGB already.
+
 Every glTF primitive gets a material, including the untextured ones, which
 get a plain white `flat`. This matters more than it sounds: glTF's default
 material is `metallicFactor` 1.0, and a fully metallic surface with nothing

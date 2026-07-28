@@ -228,6 +228,24 @@ def quaternion(rotation):
     return (x, y, z, w)
 
 
+def srgb_to_linear(value):
+    """Turns a display-space channel into the linear one glTF asks for.
+
+    glTF says COLOR_0 is linear, and multiplies it into a base colour texture
+    that is itself sRGB-encoded and converted on the way in. The game's
+    shades and swatches are display-space, so handing them over untouched
+    makes everything too bright: a mid flesh tone of 148 reaches the screen
+    at about 200, which washes a face out to near-white.
+
+    OBJ needs no such conversion -- its vertex colours have no declared
+    space, and the tools that read them treat them as sRGB already.
+    """
+
+    if value <= 0.04045:
+        return value / 12.92
+    return ((value + 0.055) / 1.055) ** 2.4
+
+
 def part_geometry(model, obj, size, y_up=True, swatches=None):
     """Returns (positions, uvs, colours, {texture: triangle indices}).
 
@@ -235,11 +253,15 @@ def part_geometry(model, obj, size, y_up=True, swatches=None):
     geometry comes back with a vertex per corner; see `tmd.object_geometry`.
     glTF only draws triangles, so each face's loop is fanned here, and a
     material belongs to a primitive, so the triangles come grouped by texture
-    index -- None for the untextured ones.
+    index -- None for the untextured ones. The colours are taken into linear
+    space on the way, which is what COLOR_0 is defined to hold.
     """
 
     positions, uvs, colours, loops, textures = tmd.object_geometry(
         model, obj, size, y_up=y_up, swatches=swatches)
+
+    colours = [(srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a)
+               for r, g, b, a in colours]
 
     indices = {}
     for loop, texture in zip(loops, textures):
