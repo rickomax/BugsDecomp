@@ -30,6 +30,9 @@ import os
 import struct
 import sys
 
+import tim
+import tmd
+
 
 # size of the header, and of the sector each section is padded out to
 HEADER_SIZE = 0x800
@@ -533,6 +536,128 @@ def cmd_chunks(args):
     return 0
 
 
+def cmd_textures(args):
+    bze = Bze(read_file(args.file))
+    report_problems(bze, args)
+
+    stem = os.path.splitext(os.path.basename(args.file))[0]
+    if args.func is cmd_textures and not args.list:
+        os.makedirs(args.outdir, exist_ok=True)
+
+    total = 0
+    for section in bze.sections:
+        data = decompress(bze.raw(section))
+        # a section's images sit end to end, but text and sound tables may come
+        # first, so fall back to searching when the run does not start at zero
+        images = list(tim.iter_tims(data))
+        if not images:
+            images = tim.find_tims(data)
+        if not images:
+            continue
+
+        covered = sum(image.end - image.offset for image in images)
+        print("section %d (ID %d): %d image%s, %d of %d bytes"
+              % (section.index, section.ident, len(images),
+                 "" if len(images) == 1 else "s", covered, len(data)))
+        total += len(images)
+
+        for i, image in enumerate(images):
+            if args.list:
+                print("  " + tim.describe(image))
+                continue
+            path = os.path.join(
+                args.outdir, "%s_s%02d_%04d.png" % (stem, section.index, i)
+            )
+            try:
+                tim.save(image, path)
+            except tim.TimError as err:
+                print("  %s: %s" % (os.path.basename(path), err),
+                      file=sys.stderr)
+
+    if not total:
+        print("no TIM images found", file=sys.stderr)
+        return 1
+    if not args.list:
+        print("wrote %d image%s to %s"
+              % (total, "" if total == 1 else "s", args.outdir))
+    return 0
+
+
+# chunk tags whose payload is an (offset, size) pair naming a model record
+MODEL_TAGS = ((0x20, 0x24), (0x22, 0x24), (0x22, 0x40))
+
+
+def find_models(bze):
+    """Locates the model records a level's load instructions point at.
+
+    Section 1 says where each model lives, as an offset into the section the
+    models were loaded from, so the two have to be read together.
+    """
+
+    sections = {s.ident: s for s in bze.sections}
+    if 1 not in sections:
+        raise BzeError("no section 1, so nothing says where the models are")
+
+    chunks, _terminated = parse_chunks(decompress(bze.raw(sections[1])))
+    wanted = []
+    for chunk in chunks:
+        for tag, payload in chunk.tags:
+            if (chunk.kind, tag) in MODEL_TAGS and len(payload) >= 8:
+                wanted.append(struct.unpack_from("<II", payload, 0))
+
+    # the models sit in the highest-numbered section, which is the one the
+    # loader makes active for model data
+    ident = max(sections)
+    data = decompress(bze.raw(sections[ident]))
+
+    found = []
+    for offset, size in sorted(set(wanted)):
+        if offset + size > len(data) or not tmd.looks_like_tmd(data, offset):
+            continue
+        found.append((offset, size, tmd.parse(data, offset)))
+    return ident, data, found
+
+
+def cmd_models(args):
+    bze = Bze(read_file(args.file))
+    report_problems(bze, args)
+
+    ident, data, models = find_models(bze)
+    if not models:
+        print("no model records found", file=sys.stderr)
+        return 1
+
+    print("section %d: %d model record%s"
+          % (ident, len(models), "" if len(models) == 1 else "s"))
+
+    if not args.list:
+        os.makedirs(args.outdir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(args.file))[0]
+
+    for i, (offset, size, model) in enumerate(models):
+        verts = sum(o.n_vert for o in model.objects)
+        prims = sum(o.n_prim for o in model.objects)
+        if args.list:
+            print("  0x%06x  %6d bytes  %3d objects  %6d vertices  %6d "
+                  "primitives" % (offset, size, len(model.objects), verts,
+                                  prims))
+            for problem in tmd.check(model, size):
+                print("      warning: %s" % problem, file=sys.stderr)
+            continue
+
+        name = "%s_%04d" % (stem, i)
+        if args.raw:
+            path = os.path.join(args.outdir, name + ".tmd")
+            with open(path, "wb") as fp:
+                fp.write(data[offset:offset + size])
+        else:
+            path = os.path.join(args.outdir, name + ".obj")
+            tmd.write_obj(path, model, name)
+        print("%s (%d objects, %d vertices)" % (path, len(model.objects),
+                                                verts))
+    return 0
+
+
 def report_problems(bze, args):
     problems = bze.check()
     if not problems:
@@ -581,6 +706,20 @@ def main(argv=None):
     p_chunks.add_argument("-s", "--summary", action="store_true",
                           help="count chunks by type instead of listing them")
     p_chunks.set_defaults(func=cmd_chunks)
+
+    p_tex = sub.add_parser("textures", parents=[common],
+                           help="write the TIM textures out as PNGs")
+    p_tex.add_argument("-o", "--outdir", default=".")
+    p_tex.add_argument("-l", "--list", action="store_true",
+                       help="show the images instead of writing them")
+    p_tex.set_defaults(func=cmd_textures)
+
+    p_mod = sub.add_parser("models", parents=[common],
+                           help="find the model records and write them out")
+    p_mod.add_argument("-o", "--outdir", default=".")
+    p_mod.add_argument("-l", "--list", action="store_true",
+                       help="describe the models instead of writing them")
+    p_mod.set_defaults(func=cmd_models)
 
     args = parser.parse_args(argv)
     try:

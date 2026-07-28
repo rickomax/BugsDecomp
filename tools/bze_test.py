@@ -23,6 +23,8 @@ import struct
 import sys
 
 import bze
+import tim
+import tmd
 
 
 # ---------------------------------------------------------------------------
@@ -345,6 +347,118 @@ def test_chunk_walk():
         FAILURES.append("%s was accepted" % what)
 
 
+def make_tim_4bpp(width_units=2, height=2, palette=None):
+    """Builds a 4bpp TIM with a 16-colour palette."""
+
+    colours = palette or [(i * 0x0421) & 0x7FFF for i in range(16)]
+    clut = struct.pack("<IHHHH", 12 + 16 * 2, 0, 0, 16, 1)
+    clut += struct.pack("<16H", *colours)
+    # each 16-bit unit holds 4 pixels, low nibble first
+    pixels = bytes(range(width_units * 2)) * height
+    block = struct.pack("<IHHHH", 12 + len(pixels), 0, 0, width_units, height)
+    return struct.pack("<II", tim.TIM_ID, tim.FLAG_HAS_CLUT | tim.PMODE_4BPP) \
+        + clut + block + pixels
+
+
+def test_tim():
+    """Parsing, the low-nibble-first order, and rejecting things that are not."""
+
+    data = make_tim_4bpp()
+    image = tim.parse(data)
+    check(image.pmode == tim.PMODE_4BPP, "pixel mode came out wrong")
+    check(image.width == 8 and image.height == 2,
+          "4bpp 2 units wide gave %dx%d, expected 8x2"
+          % (image.width, image.height))
+    check(image.end == len(data), "parsing did not consume the whole image")
+
+    # first byte is 0x00, so pixels 0 and 1 are both index 0; second is 0x01,
+    # so pixel 2 is index 1 and pixel 3 is index 0
+    colours = tim.palette(image)
+    rgba = tim.to_rgba(image)
+    check(rgba[0] == colours[0], "pixel 0 did not come from palette entry 0")
+    check(rgba[2] == colours[1],
+          "the low nibble is not the first pixel: got %r, expected %r"
+          % (rgba[2], colours[1]))
+    check(rgba[3] == colours[0], "the high nibble is not the second pixel")
+    check(len(rgba) == 16, "decoded %d pixels, expected 16" % len(rgba))
+
+    # a run of images should walk end to end, and stop at the first non-image
+    run = data + data + b"\x00\x00\x00\x00"
+    check(len(list(tim.iter_tims(run))) == 2,
+          "walking a run of two images did not find two")
+
+    for bad, what in (
+        (b"\x11\x00\x00\x00" + b"\x00" * 32, "a bad id"),
+        (struct.pack("<II", tim.TIM_ID, 0xFF) + b"\x00" * 32, "bad flags"),
+        # a block whose size does not match its rectangle
+        (struct.pack("<II", tim.TIM_ID, tim.PMODE_16BPP)
+         + struct.pack("<IHHHH", 999, 0, 0, 2, 2), "a bad block size"),
+    ):
+        try:
+            tim.parse(bad)
+        except tim.TimError:
+            continue
+        FAILURES.append("%s was accepted as a TIM" % what)
+
+    # transparent black is the one colour that is not opaque
+    check(tim.bgr555_to_rgba(0) == (0, 0, 0, 0),
+          "black should decode as transparent")
+    check(tim.bgr555_to_rgba(0x7FFF) == (255, 255, 255, 255),
+          "full white did not decode to opaque white")
+
+
+def make_tmd(objects, vertex_counts):
+    """Builds a model record with the given per-object vertex counts."""
+
+    table = b""
+    body = b""
+    # areas are laid out after the object table, offsets relative to it
+    cursor = objects * tmd.OBJECT_SIZE
+    for count in vertex_counts:
+        table_entry_start = cursor
+        verts = b"".join(
+            struct.pack("<3fi", float(i), float(i * 2), float(i * 3), i)
+            for i in range(count)
+        )
+        body += verts
+        cursor += len(verts)
+        table += struct.pack("<iIiIiIi", table_entry_start, count,
+                             cursor, 0, objects * tmd.OBJECT_SIZE, 0, 0)
+    return struct.pack("<III", tmd.TMD_ID, 0, objects) + table + body
+
+
+def test_tmd():
+    """The record layout, and the 16-byte vertices the PC port uses."""
+
+    data = make_tmd(2, [3, 4])
+    model = tmd.parse(data)
+    check(len(model.objects) == 2, "parsed %d objects, expected 2"
+          % len(model.objects))
+    check(tmd.check(model, len(data)) == [],
+          "a well-formed record was rejected: %s" % tmd.check(model, len(data)))
+
+    verts = model.vertices(model.objects[1])
+    check(len(verts) == 4, "read %d vertices, expected 4" % len(verts))
+    check(verts[2] == (2.0, 4.0, 6.0),
+          "vertex 2 came out as %r, expected (2.0, 4.0, 6.0)" % (verts[2],))
+
+    # a record whose vertex area is the PSX's 8-byte stride should be caught
+    bad = bytearray(data)
+    struct.pack_into("<I", bad, tmd.HEADER_SIZE + 4, 99)
+    check(tmd.check(tmd.parse(bytes(bad)), len(bad)) != [],
+          "a wrong vertex count passed the check")
+
+    for bad, what in (
+        (b"\x42\x00\x00\x00" + b"\x00" * 16, "a bad id"),
+        (struct.pack("<III", tmd.TMD_ID, 0, 9999), "an impossible object table"),
+    ):
+        try:
+            tmd.parse(bad)
+        except tmd.TmdError:
+            continue
+        FAILURES.append("%s was accepted as a model" % what)
+
+
 def test_bad_input():
     """Damaged files should be reported, not silently accepted."""
 
@@ -373,6 +487,8 @@ def main():
         test_stored_count_one_too_many,
         test_zero_displacement_ends_it,
         test_chunk_walk,
+        test_tim,
+        test_tmd,
         test_container,
         test_bad_input,
     ):

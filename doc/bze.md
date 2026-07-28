@@ -596,6 +596,75 @@ The following table summarizes known action codes:
 [^gmod]: most operations that modify globals have code to handle the total
 golden carrot count, which is split across two bytes
 
+# Section 3: Textures, Text and Sounds
+
+Section 3 holds a run of PSX **TIM** images laid end to end, in the format the
+PSX SDK defines: a header, an optional CLUT block, and a pixel block, each
+block giving the rectangle of video memory it was meant to load into. The
+rectangles are all recorded as (0,0), so they are assigned at load time.
+
+Across the 10 known levels this accounts for 1561 images -- 1444 of them 4bpp,
+116 8bpp and one 16bpp. Sizes are the usual powers of two, mostly 32x32, 64x64
+and 16x16. In six of the levels the run starts at offset 0 and covers the whole
+section byte for byte, which is what confirms the parse.
+
+In the other four, one or two tables come first and the images follow:
+
+* a **text** table: an array of `short` offsets, then null-terminated strings.
+The strings carry markup for the subtitle system, e.g. `>CC0 >CY-66 >CP1` for
+colour and vertical position.
+* a **sound** table: a count followed by that many `int` offsets, each to one
+sound. Loaded by v1.0 0x41e160, which hands each one to DirectSound.
+
+Nothing in the section says where one table ends and the images begin, so a
+reader has to search for the first image rather than walk from zero.
+
+Note the game's own `.bmp` handling is unrelated to any of this: the only
+bitmap it reads is `..\data\default.bmp`, a palette loaded from disk by v1.0
+0x41a590. No BZE section holds a BMP.
+
+# Section 4: Models
+
+Section 4 holds **TMD** model records, the PSX format, which is why
+`GsMapModelingData` exists in the game at all. Section 1 says where each one
+lives; the tags that name them are `0x24` and `0x40` of chunk type `0x22`, and
+`0x24` of chunk type `0x20`, each an (offset, size) pair.
+
+The outer structure is the PSX's:
+
+| offset | type | usage                          |
+|--------|------|--------------------------------|
+| 0x0    | int  | ID, always 0x41                |
+| 0x4    | int  | flags                          |
+| 0x8    | int  | object count                   |
+| 0xc    | *    | object table, 28 bytes each    |
+
+Each object entry gives, as three offset/count pairs, its vertices, normals and
+primitives, then a scale. Those offsets are relative to the start of the object
+table, i.e. to record + 0xc -- `GsMapModelingData` relocates them by exactly
+that. In every record of every known level the furthest offset lands exactly at
+the end of the record, which is what confirms the layout.
+
+The contents of each area were converted for the PC, though, so a PSX TMD
+reader will not read them:
+
+* **vertices are 16 bytes**, not the PSX's packed 8-byte `SVECTOR`. Each holds
+three IEEE floats and the vertex's own index as an `int`. Every vertex area
+across the known levels is exactly `count * 16` bytes.
+* **primitive packets are variable length** and do not use the PSX's
+`olen`/`ilen`/`flag`/`mode` header; walking them that way desynchronizes at
+once. Packet sizes of 16, 28, 30, 32, 36 and 40 bytes have been seen. What
+picks the size is not worked out yet. One lead: in a 32-byte packet the last
+four `short`s are all less than the object's vertex count, so the vertex
+indices appear to sit at the end of the packet.
+
+## Other Assets
+
+Tag `0x25` of chunk type `0x22` names records that are neither TMD nor HMD.
+They start with a `short` of 0x50, a `short` of 1 or 2, a count, and a
+width/height pair; the loader (the `0x25` case of v1.0 0x42e910) reads a
+count from +2, halves it, and keeps a pointer to +8. What they hold is unknown.
+
 # Reading BZE Files
 
 `tools/bze.py` implements this document: it lists an archive's sections,
@@ -605,6 +674,8 @@ section 1.
     python3 tools/bze.py list <file.bze>
     python3 tools/bze.py extract <file.bze> -o <outdir>
     python3 tools/bze.py chunks <file.bze> [-s]
+    python3 tools/bze.py textures <file.bze> -o <outdir>
+    python3 tools/bze.py models <file.bze> -o <outdir> [--raw]
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
 on despite a bad checksum or inconsistent header.
@@ -615,6 +686,12 @@ byte-exact and every tag length in this document is right: one wrong byte and
 the walk desynchronizes immediately. It runs clean over all 10 known levels,
 each ending on its `2f` terminator with nothing left over.
 
+`textures` writes each TIM out as a PNG, and `models` writes each model's
+vertices out as a Wavefront OBJ, or the record itself with `--raw`. The two
+formats are also readable on their own, through `tools/tim.py` and
+`tools/tmd.py`.
+
 `tools/bze_test.py` checks the implementation against a transcription of the
-game's own decompression loop, over every combination of the format's options.
-It uses generated data, since no level is checked into this repository.
+game's own decompression loop, over every combination of the format's options,
+and covers the TIM and model readers too. It uses generated data, since no
+level is checked into this repository.
