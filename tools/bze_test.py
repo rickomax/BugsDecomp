@@ -612,10 +612,16 @@ def test_gltf():
     check(doc is not None, "the image carries no JSON chunk")
     check(doc["asset"]["version"] == "2.0", "not a glTF 2.0 asset")
 
-    check(len(doc["nodes"]) == 2, "expected 2 nodes, got %d" % len(doc["nodes"]))
-    # node 1 is the root and owns node 2 as a child
+    # two TOD nodes, plus the one carrying the turn to Y-up
+    check(len(doc["nodes"]) == 3, "expected 3 nodes, got %d" % len(doc["nodes"]))
     root = doc["scenes"][0]["nodes"]
-    check(root == [0], "the scene roots came out as %r" % (root,))
+    check(root == [2], "the scene roots came out as %r" % (root,))
+    turn = doc["nodes"][2]
+    check(turn["rotation"] == gltf.Y_UP_ROTATION,
+          "the Y-up node holds %r" % turn["rotation"])
+    check(turn["children"] == [0],
+          "the Y-up node parents %r" % turn["children"])
+    # node 1 owns node 2 as a child, under the turn
     check(doc["nodes"][0].get("children") == [1],
           "the child link is %r" % doc["nodes"][0].get("children"))
     check(doc["nodes"][0]["translation"] == [10.0, 20.0, 30.0],
@@ -641,6 +647,42 @@ def test_gltf():
     check(n_pos == 4, "the mesh has %d positions, expected 4" % n_pos)
     n_idx = doc["accessors"][prim["indices"]]["count"]
     check(n_idx == 6, "a quad should fan into 6 indices, got %d" % n_idx)
+
+    # the half turn about X is a rotation, so it must not mirror anything
+    m = gltf.tod.rotation_matrix(0, 0, 0)
+    q = gltf.Y_UP_ROTATION
+    x, y, z, w = q
+    turned = [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+              [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+              [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]
+    det = (turned[0][0] * (turned[1][1] * turned[2][2] - turned[1][2] * turned[2][1])
+           - turned[0][1] * (turned[1][0] * turned[2][2] - turned[1][2] * turned[2][0])
+           + turned[0][2] * (turned[1][0] * turned[2][1] - turned[1][1] * turned[2][0]))
+    check(abs(det - 1.0) < 1e-6,
+          "the Y-up turn has determinant %r, so it mirrors the model" % det)
+    check([round(c) for c in (turned[0][1], turned[1][1], turned[2][1])]
+          == [0, -1, 0], "the Y-up turn does not send +Y to -Y")
+
+    # asking for the game's own axes must leave the tree alone
+    raw = gltf.build(model, len(record), parents, node_objects,
+                     [("walk", anim)], "test", y_up=False)
+    pos = 12
+    plain = None
+    while pos < len(raw):
+        length, kind = struct.unpack_from("<II", raw, pos)
+        pos += 8
+        if kind == 0x4E4F534A:
+            plain = json.loads(raw[pos:pos + length])
+        pos += length
+    check(len(plain["nodes"]) == 2,
+          "psx axes should give 2 nodes, got %d" % len(plain["nodes"]))
+    check(plain["scenes"][0]["nodes"] == [0],
+          "psx axes roots came out as %r" % plain["scenes"][0]["nodes"])
+
+    # the OBJ writer turns the geometry the same way
+    flipped = tmd.to_y_up([(1.0, 2.0, 3.0)])
+    check(flipped == [(1.0, -2.0, -3.0)],
+          "to_y_up gave %r" % flipped)
 
 
 def test_bad_input():

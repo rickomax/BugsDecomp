@@ -348,6 +348,18 @@ def check(model, size):
     return problems
 
 
+def to_y_up(vertices):
+    """Turns the game's axes into the Y-up ones OBJ and glTF expect.
+
+    The PSX has Y pointing down and Z into the screen, so the conversion is a
+    half turn about X. It has to be a rotation rather than a flip of Y on its
+    own: a flip is a reflection, which would mirror the model and reverse the
+    winding of every face.
+    """
+
+    return [(x, -y, -z) for x, y, z in vertices]
+
+
 def _face_loop(face):
     """Puts a face's corners in the order a polygon wants them.
 
@@ -361,7 +373,7 @@ def _face_loop(face):
     return face
 
 
-def write_obj(path, model, size, name="model", transforms=None):
+def write_obj(path, model, size, name="model", transforms=None, y_up=True):
     """Writes a model out as a Wavefront OBJ.
 
     Vertex indices run across the whole record, so the vertices go out as one
@@ -371,6 +383,8 @@ def write_obj(path, model, size, name="model", transforms=None):
     """
 
     verts = model.all_vertices(transforms)
+    if y_up:
+        verts = to_y_up(verts)
     total = 0
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
@@ -396,7 +410,8 @@ def write_obj(path, model, size, name="model", transforms=None):
     return len(verts), total
 
 
-def write_object_obj(path, model, obj, size, name="object", transforms=None):
+def write_object_obj(path, model, obj, size, name="object", transforms=None,
+                     y_up=True):
     """Writes one object of a record as an OBJ of its own.
 
     An object's faces may reach for vertices outside its own block, so this
@@ -407,6 +422,8 @@ def write_object_obj(path, model, obj, size, name="object", transforms=None):
     """
 
     verts = model.all_vertices(transforms)
+    if y_up:
+        verts = to_y_up(verts)
     try:
         faces = model.object_faces(obj, size)
     except TmdError:
@@ -451,6 +468,9 @@ def main(argv=None):
     p_obj = sub.add_parser("obj", parents=[common],
                            help="write the model out as a Wavefront OBJ")
     p_obj.add_argument("-o", "--outdir", default=".")
+    p_obj.add_argument("--psx-axes", action="store_true",
+                       help="keep the game's Y-down axes instead of "
+                            "converting to Y-up")
     p_obj.add_argument("--split", action="store_true",
                        help="write one OBJ per object instead of one for the "
                             "whole record")
@@ -485,11 +505,13 @@ def main(argv=None):
         for i, obj in enumerate(model.objects):
             name = "%s_obj%02d" % (stem, i)
             part = os.path.join(args.outdir, name + ".obj")
-            nverts, nfaces = write_object_obj(part, model, obj, len(data), name)
+            nverts, nfaces = write_object_obj(part, model, obj, len(data), name,
+                                              None, not args.psx_axes)
             print("%s (%d vertices, %d faces)" % (part, nverts, nfaces))
         return 0
 
-    nverts, nfaces = write_obj(path, model, len(data), stem)
+    nverts, nfaces = write_obj(path, model, len(data), stem, None,
+                               not args.psx_axes)
     print("%s (%d objects, %d vertices, %d faces)"
           % (path, len(model.objects), nverts, nfaces))
     return 0

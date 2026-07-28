@@ -735,7 +735,7 @@ def cmd_models(args):
             path = os.path.join(args.outdir, name + ".glb")
             labels = [("anim_%06x" % o, a) for o, _s, a in groups[i][3]]
             gltf.write_glb(path, model, size, parents, node_objects, labels,
-                           name)
+                           name, not args.psx_axes)
             n_anim = sum(1 for _l, a in labels if any(
                 p.ptype == tod.PACKET_COORDINATE
                 for f in a.frames for p in f.packets))
@@ -747,11 +747,12 @@ def cmd_models(args):
                 part = "%s_obj%02d" % (name, k)
                 path = os.path.join(args.outdir, part + ".obj")
                 nv, nf = tmd.write_object_obj(path, model, obj, size, part,
-                                              transforms)
+                                              transforms, not args.psx_axes)
                 print("%s (%d vertices, %d faces)" % (path, nv, nf))
         else:
             path = os.path.join(args.outdir, name + ".obj")
-            nv, nf = tmd.write_obj(path, model, size, name, transforms)
+            nv, nf = tmd.write_obj(path, model, size, name, transforms,
+                                   not args.psx_axes)
             posed = " posed" if transforms else ""
             print("%s (%d objects, %d vertices, %d faces%s)"
                   % (path, len(model.objects), nv, nf, posed))
@@ -851,6 +852,9 @@ def main(argv=None):
     p_mod.add_argument("--split", action="store_true",
                        help="write one OBJ per object of each model, so a bad "
                             "object can be told from a good one")
+    p_mod.add_argument("--psx-axes", action="store_true",
+                       help="keep the game's Y-down axes instead of "
+                            "converting to the Y-up that OBJ and glTF expect")
     p_mod.add_argument("--gltf", action="store_true",
                        help="write a glTF 2.0 binary (.glb) per model, with "
                             "its skeleton and animations")

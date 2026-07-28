@@ -44,6 +44,12 @@ ELEMENT_ARRAY_BUFFER = 34963
 # resolution (in 60ths) converts to seconds against it
 FRAMES_PER_SECOND = 60.0
 
+# The PSX has Y pointing down and Z into the screen; glTF has Y up. Going from
+# one to the other is a half turn about X, which as a quaternion is (1,0,0,0).
+# It has to be a rotation and not a flip of Y on its own -- that would be a
+# reflection, mirroring the model and reversing every face's winding.
+Y_UP_ROTATION = [1.0, 0.0, 0.0, 0.0]
+
 
 class Builder:
     """Accumulates glTF structures and the binary blob they point into."""
@@ -201,12 +207,17 @@ def part_geometry(model, obj, size):
 # ---------------------------------------------------------------------------
 
 
-def build(model, size, parents, node_objects, anims, name="model"):
+def build(model, size, parents, node_objects, anims, name="model",
+          y_up=True):
     """Builds a .glb image for one model and its animations.
 
     `parents` and `node_objects` come from a TOD's `skeleton`; `anims` is a
     list of (name, Tod). Animations without coordinate packets -- the setup
     file -- contribute the skeleton but no motion.
+
+    With `y_up`, the scene hangs off one extra node holding the half turn
+    that takes the game's axes to glTF's. Doing it with a node rather than by
+    moving the data means the animations come along without being touched.
     """
 
     builder = Builder()
@@ -272,7 +283,16 @@ def build(model, size, parents, node_objects, anims, name="model"):
 
     roots = [index_of[n] for n in order
              if parents.get(n, n) == n or parents[n] not in index_of]
-    builder.json["scenes"][0]["nodes"] = roots or [0]
+    roots = roots or [0]
+
+    if y_up:
+        builder.json["nodes"].append({
+            "name": "%s_yup" % name,
+            "rotation": list(Y_UP_ROTATION),
+            "children": roots,
+        })
+        roots = [len(builder.json["nodes"]) - 1]
+    builder.json["scenes"][0]["nodes"] = roots
 
     for label, anim in anims:
         channels, samplers = animation_tracks(builder, anim, index_of)
@@ -334,10 +354,11 @@ def animation_tracks(builder, anim, index_of):
     return channels, samplers
 
 
-def write_glb(path, model, size, parents, node_objects, anims, name="model"):
+def write_glb(path, model, size, parents, node_objects, anims, name="model",
+              y_up=True):
     """Writes one model and its animations to `path`."""
 
-    image = build(model, size, parents, node_objects, anims, name)
+    image = build(model, size, parents, node_objects, anims, name, y_up)
     with open(path, "wb") as fp:
         fp.write(image)
     return image

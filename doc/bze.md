@@ -839,7 +839,7 @@ section 1.
     python3 tools/bze.py extract <file.bze> -o <outdir>
     python3 tools/bze.py chunks <file.bze> [-s]
     python3 tools/bze.py textures <file.bze> -o <outdir>
-    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split] [--pose] [--gltf]
+    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split] [--pose] [--gltf] [--psx-axes]
     python3 tools/bze.py anims <file.bze>
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
@@ -867,7 +867,14 @@ so nothing is baked and no skinning is involved. Two conversions happen on the
 way: the game's Q12 Euler angles become quaternions, and each part's faces are
 renumbered against that part's own vertices, which is also what keeps its copy
 of a seam vertex in its own space. Over the known levels this writes 68 files
-holding 732 nodes, 633 meshes and 107 animations. The two
+holding 732 nodes, 633 meshes and 107 animations.
+
+Both writers convert the game's axes to the Y-up ones OBJ and glTF expect. The
+PSX has Y pointing down and Z into the screen, so the conversion is a half turn
+about X -- a rotation, not a flip of Y on its own, which would be a reflection
+and would mirror the model and reverse the winding of every face. The glTF
+export does it with one extra node above the scene, so the animations come
+along untouched. Pass `--psx-axes` to keep the game's own orientation. The two
 formats are also readable on their own, through `tools/tim.py` and
 `tools/tmd.py`.
 
