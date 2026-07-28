@@ -26,6 +26,7 @@ import bze
 import tim
 import tmd
 import tod
+import gltf
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +551,98 @@ def test_tod():
         FAILURES.append("%s was accepted as a TOD" % what)
 
 
+def make_tmd_with_quad():
+    """Builds a one-object record holding a single 0x4e quad."""
+
+    # header, then a 28-byte object table, then the primitive, then vertices
+    prim_top = tmd.OBJECT_SIZE
+    vert_top = prim_top + 32
+    normal_top = vert_top + 4 * tmd.VERTEX_SIZE
+    table = struct.pack("<iIiIiIi", vert_top, 4, normal_top, 0, prim_top, 1, 0)
+
+    packet = bytearray(32)
+    struct.pack_into("<H", packet, 0, 1)      # one primitive left in the run
+    packet[3] = 0x4E                          # the mode, which fixes the size
+    for slot, vertex in zip(tmd.PRIMITIVE_SLOTS[0x4E], (0, 1, 2, 3)):
+        struct.pack_into("<H", packet, slot * 2, vertex)
+
+    verts = b"".join(
+        struct.pack("<3fI", float(i), float(i * 2), 0.0, i) for i in range(4)
+    )
+    return (struct.pack("<III", tmd.TMD_ID, 0, 1) + table + bytes(packet)
+            + verts)
+
+
+def test_gltf():
+    """A built glb must be well formed and place its meshes correctly."""
+
+    import json
+
+    record = make_tmd_with_quad()
+    model = tmd.parse(record)
+    # a node tree: node 2 hangs off node 1, which carries the model's object 0
+    parents = {2: 1}
+    node_objects = {1: 0}
+    rot = struct.pack("<4h", 1024, 0, 0, 0)
+    scale = struct.pack("<4h", 0x1000, 0x1000, 0x1000, 0)
+    trans = struct.pack("<3i", 10, 20, 30)
+    anim = tod.parse(*(lambda blob: (blob, 0, len(blob)))(make_tod([
+        (0, [(1, tod.PACKET_COORDINATE, 0xE, rot + scale + trans),
+             (2, tod.PACKET_COORDINATE, 0xE, rot + scale + trans)]),
+        (1, [(1, tod.PACKET_COORDINATE, 0xE, rot + scale + trans)]),
+    ], resolution=2)))
+
+    check(len(model.faces(len(record))) == 1,
+          "the built record should hold exactly one face")
+    image = gltf.build(model, len(record), parents, node_objects,
+                       [("walk", anim)], "test")
+    check(image[:4] == b"glTF", "the image does not start with the glTF magic")
+    total, = struct.unpack_from("<I", image, 8)
+    check(total == len(image),
+          "the header length is %d but the image is %d" % (total, len(image)))
+
+    pos = 12
+    doc = None
+    while pos < len(image):
+        length, kind = struct.unpack_from("<II", image, pos)
+        pos += 8
+        if kind == 0x4E4F534A:
+            doc = json.loads(image[pos:pos + length])
+        pos += length
+    check(doc is not None, "the image carries no JSON chunk")
+    check(doc["asset"]["version"] == "2.0", "not a glTF 2.0 asset")
+
+    check(len(doc["nodes"]) == 2, "expected 2 nodes, got %d" % len(doc["nodes"]))
+    # node 1 is the root and owns node 2 as a child
+    root = doc["scenes"][0]["nodes"]
+    check(root == [0], "the scene roots came out as %r" % (root,))
+    check(doc["nodes"][0].get("children") == [1],
+          "the child link is %r" % doc["nodes"][0].get("children"))
+    check(doc["nodes"][0]["translation"] == [10.0, 20.0, 30.0],
+          "the rest translation is %r" % doc["nodes"][0]["translation"])
+    quat = doc["nodes"][0]["rotation"]
+    check(abs(sum(c * c for c in quat) - 1.0) < 1e-6,
+          "the rest rotation is not a unit quaternion: %r" % (quat,))
+
+    # only node 1 moves over two frames, so only it gets channels
+    anims = doc["animations"]
+    check(len(anims) == 1, "expected one animation, got %d" % len(anims))
+    targets = {c["target"]["node"] for c in anims[0]["channels"]}
+    check(targets == {0}, "channels target %r, expected only node 0" % targets)
+    paths = {c["target"]["path"] for c in anims[0]["channels"]}
+    check(paths == {"translation", "rotation", "scale"},
+          "channel paths came out as %r" % paths)
+
+    # a mesh hangs off node 1, and its indices stay inside its own positions
+    check("mesh" in doc["nodes"][0], "the object's node carries no mesh")
+    prim = doc["meshes"][0]["primitives"][0]
+    check(prim["mode"] == gltf.TRIANGLES, "primitives are not triangles")
+    n_pos = doc["accessors"][prim["attributes"]["POSITION"]]["count"]
+    check(n_pos == 4, "the mesh has %d positions, expected 4" % n_pos)
+    n_idx = doc["accessors"][prim["indices"]]["count"]
+    check(n_idx == 6, "a quad should fan into 6 indices, got %d" % n_idx)
+
+
 def test_bad_input():
     """Damaged files should be reported, not silently accepted."""
 
@@ -581,6 +674,7 @@ def main():
         test_tim,
         test_tmd,
         test_tod,
+        test_gltf,
         test_container,
         test_bad_input,
     ):

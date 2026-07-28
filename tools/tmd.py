@@ -186,6 +186,28 @@ class Tmd:
                 out[low] = vert
         return out
 
+    def object_vertex_map(self, obj):
+        """Returns {index: (x, y, z)} for one object, in its own local space.
+
+        Faces index the record-wide space, but a seam vertex is stored once
+        per object that draws it, each copy in that object's own space. So a
+        part's geometry has to resolve its indices against its own vertices,
+        not against the record's canonical ones -- otherwise a seam vertex
+        arrives in a sibling's coordinate frame. An object's own vertices
+        cover every index its faces name, in all 672 objects of the known
+        levels.
+        """
+
+        out = {}
+        start = self.base + obj.vert_top
+        for i in range(obj.n_vert):
+            at = start + i * VERTEX_SIZE
+            if at + VERTEX_SIZE > len(self._data):
+                raise TmdError("vertex area runs past the end of the data")
+            x, y, z, field = struct.unpack_from("<3fI", self._data, at)
+            out.setdefault(field & 0x7FFF, (x, y, z))
+        return out
+
     def primitive_area(self, obj, size):
         """Returns (start, length) of an object's primitive packets.
 

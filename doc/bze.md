@@ -824,8 +824,10 @@ The proof the chain is right is the model's own seams: seam-flagged duplicate
 vertices sit in different objects, and under the composed bind pose each lands
 on its twin (median error ~2 world units, against ~34 unposed).
 
-The rest of a gameplay animation is rotation-only differential frames
-animating the limbs; playing them back is not implemented.
+Frames are absolute, never differential: bit 0 of a coordinate packet's flag
+selects the two, and it is clear in all 225567 coordinate packets of the known
+levels. Frame numbers always run 0..N-1, so a frame's time is simply its number
+times the resolution over 60.
 
 # Reading BZE Files
 
@@ -837,7 +839,7 @@ section 1.
     python3 tools/bze.py extract <file.bze> -o <outdir>
     python3 tools/bze.py chunks <file.bze> [-s]
     python3 tools/bze.py textures <file.bze> -o <outdir>
-    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split] [--pose]
+    python3 tools/bze.py models <file.bze> -o <outdir> [--raw] [--split] [--pose] [--gltf]
     python3 tools/bze.py anims <file.bze>
 
 Pass `--raw` to write sections without decompressing them, and `--force` to go
@@ -856,7 +858,16 @@ whichever vertices its faces name and renumbering them so the file stands alone
 -- which is the way to tell an object that decoded well from one that did not.
 `--pose` places each model's objects using its skeleton and bind pose from the
 TOD animations, and `anims` lists them; the TOD format itself is readable on
-its own through `tools/tod.py`. The two
+its own through `tools/tod.py`.
+
+`--gltf` writes a glTF 2.0 binary (`.glb`) per model instead, carrying the node
+tree, one mesh per object, and every animation of that model. The mapping is
+direct -- a TOD node is a glTF node and a coordinate packet is a TRS keyframe --
+so nothing is baked and no skinning is involved. Two conversions happen on the
+way: the game's Q12 Euler angles become quaternions, and each part's faces are
+renumbered against that part's own vertices, which is also what keeps its copy
+of a seam vertex in its own space. Over the known levels this writes 68 files
+holding 732 nodes, 633 meshes and 107 animations. The two
 formats are also readable on their own, through `tools/tim.py` and
 `tools/tmd.py`.
 

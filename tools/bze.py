@@ -30,6 +30,7 @@ import os
 import struct
 import sys
 
+import gltf
 import tim
 import tmd
 import tod
@@ -644,6 +645,22 @@ def find_assets(bze):
     return ident, data, groups
 
 
+def skeleton_of(anims):
+    """Merges the skeleton every animation of a model carries.
+
+    Only the single-frame setup TOD holds it in practice, but nothing says the
+    others may not, so all of them are consulted.
+    """
+
+    parents = {}
+    objects = {}
+    for _offset, _size, anim in anims:
+        got_parents, got_objects = anim.skeleton()
+        parents.update(got_parents)
+        objects.update(got_objects)
+    return parents, objects
+
+
 def bind_transforms(model, anims):
     """Builds each object's world transform from a model's animations.
 
@@ -655,13 +672,9 @@ def bind_transforms(model, anims):
     has no skeleton to pose it.
     """
 
-    parents = {}
-    objects = {}
+    parents, objects = skeleton_of(anims)
     pose = {}
     for _offset, _size, anim in anims:
-        got_parents, got_objects = anim.skeleton()
-        parents.update(got_parents)
-        objects.update(got_objects)
         candidate = anim.pose(0)
         if len(candidate) > len(pose):
             pose = candidate
@@ -714,6 +727,21 @@ def cmd_models(args):
                 fp.write(data[offset:offset + size])
             print("%s (%d objects, %d vertices)"
                   % (path, len(model.objects), verts))
+        elif getattr(args, "gltf", False):
+            parents, node_objects = skeleton_of(groups[i][3])
+            if not node_objects:
+                print("%s: no skeleton, skipping" % name, file=sys.stderr)
+                continue
+            path = os.path.join(args.outdir, name + ".glb")
+            labels = [("anim_%06x" % o, a) for o, _s, a in groups[i][3]]
+            gltf.write_glb(path, model, size, parents, node_objects, labels,
+                           name)
+            n_anim = sum(1 for _l, a in labels if any(
+                p.ptype == tod.PACKET_COORDINATE
+                for f in a.frames for p in f.packets))
+            print("%s (%d objects, %d animation%s)"
+                  % (path, len(model.objects), n_anim,
+                     "" if n_anim == 1 else "s"))
         elif args.split:
             for k, obj in enumerate(model.objects):
                 part = "%s_obj%02d" % (name, k)
@@ -823,6 +851,9 @@ def main(argv=None):
     p_mod.add_argument("--split", action="store_true",
                        help="write one OBJ per object of each model, so a bad "
                             "object can be told from a good one")
+    p_mod.add_argument("--gltf", action="store_true",
+                       help="write a glTF 2.0 binary (.glb) per model, with "
+                            "its skeleton and animations")
     p_mod.add_argument("--pose", action="store_true",
                        help="place each model's objects using its skeleton and "
                             "bind pose from the TOD animations")
