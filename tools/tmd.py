@@ -9,10 +9,10 @@ relative-offset scheme are the PSX format, and `GsMapModelingData` (v1.0
 converted for the PC, though, so a stock PSX TMD reader will not read them:
 
 - vertices are 16 bytes, not the PSX's 8-byte packed SVECTOR. Each holds three
-  IEEE floats and a fourth field of unclear purpose -- it is a running index in
-  some records and zero throughout in others, so nothing here relies on it.
-  What is verified is the stride: every vertex area across the known levels is
-  exactly `count * 16` bytes.
+  IEEE floats and its index in the space the primitives use: the low 15 bits
+  place it, and the high bit marks a seam duplicate sharing its index with
+  another vertex. The world models leave the field zero and are numbered by
+  position instead.
 - primitive packets are variable length and do not use the PSX's
   olen/ilen/flag/mode header. Byte 3 is a mode that fixes the length; the
   table comes from the game itself (v1.0 0x423f30). Where the vertex indices
@@ -37,7 +37,7 @@ TMD_ID = 0x41
 
 HEADER_SIZE = 12
 OBJECT_SIZE = 28
-# three floats and a fourth field of unclear purpose
+# three floats, then the vertex's index and seam flag
 VERTEX_SIZE = 16
 
 # Bytes one primitive takes up, keyed by the mode byte at offset 3. Taken
@@ -136,14 +136,39 @@ class Tmd:
     def all_vertices(self):
         """Returns the record's vertices, in the order primitives index them.
 
-        Primitives index vertices across the whole record rather than per
-        object, and the numbering follows the order the vertex areas sit in,
-        so the objects are concatenated in that order.
+        Each vertex's fourth field says where it sits in the index space the
+        primitives use: the low 15 bits are its index, and the high bit marks
+        a duplicate -- a seam vertex sharing its index with another. Several
+        vertices can share one index, so the index space is smaller than the
+        vertex array; the unflagged vertex is the canonical one for its index.
+
+        Some records leave the field zero throughout (the single-object world
+        models). There the numbering is simply the order the vertices sit in,
+        with the objects taken in vertex-area order.
         """
 
-        out = []
+        verts = []
+        fields = []
         for obj in sorted(self.objects, key=lambda o: o.vert_top):
-            out.extend(self.vertices(obj))
+            start = self.base + obj.vert_top
+            for i in range(obj.n_vert):
+                at = start + i * VERTEX_SIZE
+                if at + VERTEX_SIZE > len(self._data):
+                    raise TmdError("vertex area runs past the end of the data")
+                x, y, z, field = struct.unpack_from("<3fI", self._data, at)
+                verts.append((x, y, z))
+                fields.append(field)
+
+        lows = [f & 0x7FFF for f in fields]
+        space = set(lows)
+        # only trust the field when it lays out a complete 0..N-1 space
+        if len(verts) < 2 or space != set(range(len(space))) or len(space) < 2:
+            return verts
+
+        out = [None] * len(space)
+        for low, field, vert in zip(lows, fields, verts):
+            if out[low] is None or not field >> 15:
+                out[low] = vert
         return out
 
     def primitive_area(self, obj, size):

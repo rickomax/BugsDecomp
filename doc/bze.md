@@ -652,19 +652,30 @@ reader will not read them.
 
 Vertices are **16 bytes**, not the PSX's packed 8-byte `SVECTOR`:
 
-| offset | type  | usage                |
-|--------|-------|----------------------|
-| 0x0    | float | X                    |
-| 0x4    | float | Y                    |
-| 0x8    | float | Z                    |
-| 0xc    | int   | varies; see below    |
+| offset | type  | usage                                    |
+|--------|-------|------------------------------------------|
+| 0x0    | float | X                                        |
+| 0x4    | float | Y                                        |
+| 0x8    | float | Z                                        |
+| 0xc    | int   | index into the primitive index space     |
 
 Every vertex area across the known levels is exactly `count * 16` bytes, which
-is what confirms the stride. The last field is a running vertex number in some
-records and zero throughout in others, so nothing should depend on it.
+is what confirms the stride.
 
-Primitives number vertices across the whole record rather than per object, with
-the objects counted in the order their vertex areas appear.
+The last field is how primitives find their vertices. Its low 15 bits are the
+vertex's index in the space the face indices use, and bit 15 marks a **seam
+duplicate**: a vertex sharing its index with another, of which the unflagged
+one is canonical. Several stored vertices can therefore stand behind one index,
+so the index space is smaller than the vertex array -- in the multi-object
+character records, considerably so (one 445-vertex record has a 313-entry index
+space, with exactly its 132 flagged vertices accounting for the difference).
+Ignoring the field and numbering vertices by storage order decodes the
+single-object world models correctly and scrambles every character, because the
+world models leave the field zero throughout and are numbered by position.
+
+Across the known levels, 92 of the 101 records carry a complete 0..N-1 index
+space in this field; the other 9 are the zeroed world models. In all 92, every
+face index falls inside that space.
 
 ### Primitives
 

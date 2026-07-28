@@ -407,21 +407,31 @@ def test_tim():
           "full white did not decode to opaque white")
 
 
-def make_tmd(objects, vertex_counts):
-    """Builds a model record with the given per-object vertex counts."""
+def make_tmd(objects, vertex_counts, fields=None):
+    """Builds a model record with the given per-object vertex counts.
+
+    Vertex index fields are numbered across the record, the way the game
+    numbers them; pass `fields` to control them directly.
+    """
 
     table = b""
     body = b""
     # areas are laid out after the object table, offsets relative to it
     cursor = objects * tmd.OBJECT_SIZE
+    base = 0
     for count in vertex_counts:
         table_entry_start = cursor
         verts = b"".join(
-            struct.pack("<3fi", float(i), float(i * 2), float(i * 3), i)
+            struct.pack(
+                "<3fI", float(base + i), float((base + i) * 2),
+                float((base + i) * 3),
+                fields[base + i] if fields else base + i,
+            )
             for i in range(count)
         )
         body += verts
         cursor += len(verts)
+        base += count
         table += struct.pack("<iIiIiIi", table_entry_start, count,
                              cursor, 0, objects * tmd.OBJECT_SIZE, 0, 0)
     return struct.pack("<III", tmd.TMD_ID, 0, objects) + table + body
@@ -441,8 +451,23 @@ def test_tmd():
     check(len(verts) == 4, "read %d vertices, expected 4" % len(verts))
     check(len(model.all_vertices()) == 7,
           "the record should hold 7 vertices across its objects")
-    check(verts[2] == (2.0, 4.0, 6.0),
-          "vertex 2 came out as %r, expected (2.0, 4.0, 6.0)" % (verts[2],))
+
+    # the index space: a permuted numbering must reorder the vertices, and a
+    # high bit marks a duplicate that must lose to the unflagged holder
+    permuted = make_tmd(1, [4], fields=[2, 0, 3, 1])
+    got = tmd.parse(permuted).all_vertices()
+    check([v[0] for v in got] == [1.0, 3.0, 0.0, 2.0],
+          "a permuted index field did not reorder the vertices: %r" % (got,))
+    seam = make_tmd(1, [4], fields=[0, 1, 2, 1 | 0x8000])
+    got = tmd.parse(seam).all_vertices()
+    check(len(got) == 3 and got[1][0] == 1.0,
+          "a flagged duplicate displaced its canonical vertex: %r" % (got,))
+    # all-zero fields mean positional numbering, as the world models use
+    zeroed = make_tmd(1, [4], fields=[0, 0, 0, 0])
+    check(len(tmd.parse(zeroed).all_vertices()) == 4,
+          "zeroed index fields should fall back to positional order")
+    check(verts[2] == (5.0, 10.0, 15.0),
+          "vertex 2 came out as %r, expected (5.0, 10.0, 15.0)" % (verts[2],))
 
     # a record whose vertex area is the PSX's 8-byte stride should be caught
     bad = bytearray(data)
