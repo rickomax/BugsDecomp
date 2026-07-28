@@ -766,28 +766,34 @@ draw flags for the whole face. The two shorts sit where the PSX TMD format
 puts the CLUT and the texture page, but the PC port keeps no VRAM, so what
 they hold is not what a PSX would put there:
 
-| mode | UV bytes (u,v)              | texture | flags | colour bytes  |
+| mode | UV bytes (u,v)              | texture | flags | shade bytes   |
 |------|-----------------------------|---------|-------|---------------|
 | 0x38 | 4,5 8,9 12,13               | 6       | 10    | 16            |
 | 0x3c | 4,5 8,9 12,13               | 6       | 10    | 16 20 24      |
 | 0x40 | 4,5 8,9 12,13 14,15         | 6       | 10    | 16 20 24 28   |
-| 0x4a | --                          | --      | --    | 8 12 16       |
-| 0x4e | --                          | --      | --    | 8 12 16 20    |
+| 0x4a | --                          | 4       | 6     | 8 12 16       |
+| 0x4e | --                          | 4       | 6     | 8 12 16 20    |
 
-A colour is three bytes, RGB, followed by a zero pad byte. `0x38` gives one
-colour to the whole face and the rest give one per corner, which matches flat
-against gouraud shading; the untextured modes drop the UV, texture and flag
-bytes and keep the colours.
+A "colour" is three bytes, RGB, followed by a zero pad byte -- but it is a
+*shade*, not a colour: the PSX modulation factor where 0x80 is neutral,
+multiplied into the face's texture. `0x38` gives one shade to the whole face
+and the rest give one per corner, which matches flat against gouraud shading.
 
-A primitive never carries both a face colour and per-corner colours -- it is
-one or the other -- so an exporter has nothing to combine. The flat modes are
-written out by giving every corner of the face the same colour, which is what
-makes a single `COLOR_0` attribute enough for glTF.
+The modes without UVs still name a texture -- their index and flags sit right
+behind the header, at bytes 4 and 6 -- and what they usually name is one of
+the tiny 4x4 *swatch* textures registered at the end of a level: a single
+solid colour each (white, a skin tone, cloth browns, and so on). A "flat"
+face is that swatch shaded by its corner values, which is where the actual
+colour of untextured geometry lives. Read the shades as colours and every
+character comes out grey, because the shades are near-grey lighting values;
+the colour is in the swatch. What the modes without UVs drop against their
+textured counterparts is exactly the 8 bytes of the second and third UV pair.
 
-The colours are used as they are, not as the PSX modulation where 0x80 means
-"leave the texture alone". They spread evenly over the whole 0-255 range with
-no clustering at 128 -- 0.2-0.5% of channels sit exactly there, about what
-chance gives -- so the exporters divide by 255.
+That also settles the scale: the shades sit around 0x80, and a white swatch
+shaded by them must stay white, which dividing by 255 fails (white lands on
+mid grey) and dividing by 128 gets right. The exporters therefore compute
+`shade / 128 * swatch`, clamped at 1.0 after the multiply, and use
+`shade / 128` for `COLOR_0` on textured faces too.
 
 The **texture** short is an index into the level's texture registrations, made
 by chunk type 0x29 in section 1: each 0x2a tag loads one TIM from the asset
@@ -962,6 +968,12 @@ models, with a `usemtl` per face run; the glTF writer embeds the PNGs in the
 `.glb` and splits an object that mixes textures into one primitive per
 texture, sampled NEAREST with alpha-masking, since transparent black is the
 TIM cut-out colour.
+
+The swatch faces are handled differently, because neither format can
+multiply a per-face texture into vertex colours: their swatch's colour is
+baked into the exported colour instead -- `shade / 128 * swatch`, per corner
+-- and they go out as untextured faces under the `flat` material. Nothing is
+lost by it, since a swatch has no detail to sample, only the one colour.
 
 Every glTF primitive gets a material, including the untextured ones, which
 get a plain white `flat`. This matters more than it sounds: glTF's default

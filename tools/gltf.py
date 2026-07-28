@@ -228,7 +228,7 @@ def quaternion(rotation):
     return (x, y, z, w)
 
 
-def part_geometry(model, obj, size, y_up=True):
+def part_geometry(model, obj, size, y_up=True, swatches=None):
     """Returns (positions, uvs, colours, {texture: triangle indices}).
 
     UVs and colours belong to a face's corner rather than to a vertex, so the
@@ -239,7 +239,7 @@ def part_geometry(model, obj, size, y_up=True):
     """
 
     positions, uvs, colours, loops, textures = tmd.object_geometry(
-        model, obj, size, y_up=y_up)
+        model, obj, size, y_up=y_up, swatches=swatches)
 
     indices = {}
     for loop, texture in zip(loops, textures):
@@ -256,7 +256,7 @@ def part_geometry(model, obj, size, y_up=True):
 
 
 def build(model, size, parents, node_objects, anims, name="model",
-          y_up=True, textures=None):
+          y_up=True, textures=None, swatches=None):
     """Builds a .glb image for one model and its animations.
 
     `parents` and `node_objects` come from a TOD's `skeleton`; `anims` is a
@@ -268,9 +268,10 @@ def build(model, size, parents, node_objects, anims, name="model",
     moving the data means the animations come along without being touched.
 
     `textures` maps a texture index -- the level's registration number that
-    each face carries -- to that texture as PNG bytes. Each one a face names
-    becomes an embedded image and a material; faces naming one the mapping
-    does not cover, or no texture at all, go out without a material.
+    each face carries -- to that texture as PNG bytes. Each one a face with
+    UVs names becomes an embedded image and a material. `swatches` maps an
+    index to a solid colour instead, for the faces without UVs, whose colour
+    is baked into COLOR_0; see `tmd.object_geometry`.
     """
 
     builder = Builder()
@@ -300,7 +301,7 @@ def build(model, size, parents, node_objects, anims, name="model",
         if not 0 <= obj_index < len(model.objects):
             continue
         positions, uvs, colours, by_texture = part_geometry(
-            model, model.objects[obj_index], size, False)
+            model, model.objects[obj_index], size, False, swatches)
         if not positions or not by_texture:
             continue
         component = (UNSIGNED_INT if len(positions) > 0xFFFF
@@ -428,11 +429,11 @@ def animation_tracks(builder, anim, index_of):
 
 
 def write_glb(path, model, size, parents, node_objects, anims, name="model",
-              y_up=True, textures=None):
+              y_up=True, textures=None, swatches=None):
     """Writes one model and its animations to `path`."""
 
     image = build(model, size, parents, node_objects, anims, name, y_up,
-                  textures)
+                  textures, swatches)
     with open(path, "wb") as fp:
         fp.write(image)
     return image

@@ -93,11 +93,14 @@ PRIMITIVE_SLOTS = {
 # - which slots vary within one object. `tpage` holds still (1-4% of objects
 #   vary) while the UV pairs move on almost every face (84-96%), which is what
 #   separates the texture fields from the coordinates.
-# - the untextured modes are exactly 8 bytes shorter than their textured
-#   counterparts and carry no such block, which is the room the UVs take up.
+# - the modes without UVs are exactly 8 bytes shorter than their textured
+#   counterparts, the 8 bytes being the second and third UV pair; the texture
+#   fields move up to right behind the header.
 #
-# Colours read as PSX vertex colours: 0x80 is neutral, and they are grey for
-# 100% of flat faces and most gouraud ones, tinted for the rest.
+# Every mode references a texture, including the ones with no UVs: their index
+# usually names one of the tiny single-colour swatch textures registered at
+# the end of a level, and the face's colour is that swatch modulated by the
+# per-corner shade. See `object_geometry`.
 PRIMITIVE_LAYOUT = {
     0x38: {"uv": [(4, 5), (8, 9), (12, 13)], "clut": 6, "tpage": 10,
            "colours": [16]},
@@ -105,14 +108,19 @@ PRIMITIVE_LAYOUT = {
            "colours": [16, 20, 24]},
     0x40: {"uv": [(4, 5), (8, 9), (12, 13), (14, 15)], "clut": 6, "tpage": 10,
            "colours": [16, 20, 24, 28]},
-    0x4A: {"uv": None, "clut": None, "tpage": None, "colours": [8, 12, 16]},
-    0x4E: {"uv": None, "clut": None, "tpage": None,
-           "colours": [8, 12, 16, 20]},
+    0x4A: {"uv": None, "clut": 4, "tpage": 6, "colours": [8, 12, 16]},
+    0x4E: {"uv": None, "clut": 4, "tpage": 6, "colours": [8, 12, 16, 20]},
 }
 
 # A texture page is this many texels across, so a stored coordinate divided by
 # it lands in the 0..1 the usual formats want.
 TEXTURE_PAGE_SIZE = 256.0
+
+# A stored colour is a modulation factor the PSX way: 0x80 is neutral, and
+# values above it brighten. The shades on the swatch-textured faces sit
+# around it, and a white swatch through them has to stay white, which /255
+# fails (it lands on mid grey) and /128 gets right.
+MODULATION_NEUTRAL = 128.0
 
 # The stored winding faces inward: taking each face's corners in the order
 # they are stored, 74% of the known levels' faces have their normal pointing
@@ -476,7 +484,8 @@ def _face_loop(face):
     return tuple(face[i] for i in face_loop(len(face)))
 
 
-def object_geometry(model, obj, size, transforms=None, y_up=True):
+def object_geometry(model, obj, size, transforms=None, y_up=True,
+                    swatches=None):
     """Returns (positions, uvs, colours, loops, textures) for one object.
 
     A UV and a colour belong to a corner of a face rather than to a vertex, so
@@ -485,12 +494,22 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
     does: `positions`, `uvs` and `colours` are all the same length, and each
     entry of `loops` is one face as a list of positions into them.
 
+    A stored colour is not a colour but a *shade*: the PSX modulation factor
+    where 0x80 is neutral. A face with UVs shades its texture with it, and a
+    face without UVs shades a solid-colour swatch texture instead -- the tiny
+    4x4 registrations at the end of a level -- which is where the flat faces'
+    actual colours (skin, cloth) live. `swatches` maps a texture index to
+    that texture's colour as an (r, g, b) 0-255 triple; a swatch face's
+    colour comes out premultiplied, shade times swatch, since a mesh format
+    has one colour slot per corner and nothing to multiply it with later.
+    Without `swatches`, a swatch face falls back to its bare shade, which is
+    grey.
+
     `colours` is always filled in, with white where a primitive carries none.
-    `uvs` is empty unless something in the object is textured, since a UV
-    means nothing without a texture to look it up in. `textures` gives each
-    loop's texture index -- the packet field the PSX would call a CLUT, which
-    this port reads as an index into the level's texture registrations -- or
-    None where a face has no texture.
+    `uvs` is empty unless something in the object has UVs. `textures` gives
+    each loop's texture index for the faces that sample a real texture, and
+    None for the swatch faces, whose texture is already baked into their
+    colours.
     """
 
     try:
@@ -512,6 +531,9 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
         order = face_loop(len(face))
         if any(face.indices[i] not in lookup for i in order):
             continue
+        swatch = None
+        if not face.uvs and swatches and face.clut in swatches:
+            swatch = swatches[face.clut]
         loop = []
         for corner in order:
             loop.append(len(positions))
@@ -527,8 +549,12 @@ def object_geometry(model, obj, size, transforms=None, y_up=True):
                 else:
                     uvs.append((0.0, 0.0))
             if face.colours:
-                r, g, b = face.colours[corner]
-                colours.append((r / 255.0, g / 255.0, b / 255.0, 1.0))
+                shade = [c / MODULATION_NEUTRAL for c in face.colours[corner]]
+                if swatch:
+                    shade = [s * c / 255.0 for s, c in zip(shade, swatch)]
+                # clamped after the multiply, so a bright shade may still
+                # push a dark swatch above its stored colour, as on the PSX
+                colours.append(tuple(min(s, 1.0) for s in shade) + (1.0,))
             else:
                 colours.append((1.0, 1.0, 1.0, 1.0))
         loops.append(loop)
@@ -572,7 +598,7 @@ def _write_obj_part(fp, positions, uvs, colours, loops, base, textures=None,
 
 
 def write_obj(path, model, size, name="model", transforms=None, y_up=True,
-              mtllib=None):
+              mtllib=None, swatches=None):
     """Writes a model out as a Wavefront OBJ.
 
     Each object becomes its own group, so a viewer can show them apart.
@@ -597,7 +623,7 @@ def write_obj(path, model, size, name="model", transforms=None, y_up=True,
                 fp.write("# object %d: %s\n" % (i, err))
                 continue
             positions, uvs, colours, loops, textures = object_geometry(
-                model, obj, size, transforms, y_up)
+                model, obj, size, transforms, y_up, swatches)
             if not loops:
                 continue
             fp.write("g %s_obj%02d\n" % (name, i))
@@ -609,7 +635,7 @@ def write_obj(path, model, size, name="model", transforms=None, y_up=True,
 
 
 def write_object_obj(path, model, obj, size, name="object", transforms=None,
-                     y_up=True, mtllib=None):
+                     y_up=True, mtllib=None, swatches=None):
     """Writes one object of a record as an OBJ of its own.
 
     Each file is self-contained, which is what makes it useful for telling a
@@ -618,7 +644,7 @@ def write_object_obj(path, model, obj, size, name="object", transforms=None,
     """
 
     positions, uvs, colours, loops, textures = object_geometry(
-        model, obj, size, transforms, y_up)
+        model, obj, size, transforms, y_up, swatches)
 
     if not loops:
         # nothing walked, so fall back to the object's own vertices

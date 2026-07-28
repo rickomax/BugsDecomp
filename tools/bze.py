@@ -752,6 +752,19 @@ def cmd_models(args):
     png_of = {}     # texture index -> PNG bytes, decoded once
     mtllib = None   # the .mtl next to the OBJs, written on first use
 
+    # a face without UVs names a texture too -- normally one of the tiny
+    # solid-colour swatches -- and shades it flat, so what the exporters need
+    # from it is just its colour
+    swatches = {}
+    for index, image in registry.items():
+        try:
+            opaque = [c for c in tim.to_rgba(image, 0) if c[3]]
+        except tim.TimError:
+            continue
+        if opaque:
+            swatches[index] = tuple(
+                sum(c[k] for c in opaque) // len(opaque) for k in range(3))
+
     def png_for(index):
         if index not in png_of and index in registry:
             png_of[index] = tim.png_bytes(registry[index])
@@ -822,7 +835,8 @@ def cmd_models(args):
             labels = [("anim_%06x" % o, a) for o, _s, a in groups[i][3]]
             gltf.write_glb(path, model, size, parents, node_objects, labels,
                            name, not args.psx_axes,
-                           {index: png_for(index) for index in registry})
+                           {index: png_for(index) for index in registry},
+                           swatches)
             n_anim = sum(1 for _l, a in labels if any(
                 p.ptype == tod.PACKET_COORDINATE
                 for f in a.frames for p in f.packets))
@@ -836,13 +850,13 @@ def cmd_models(args):
                 path = os.path.join(args.outdir, part + ".obj")
                 nv, nf = tmd.write_object_obj(path, model, obj, size, part,
                                               transforms, not args.psx_axes,
-                                              materials)
+                                              materials, swatches)
                 print("%s (%d vertices, %d faces)" % (path, nv, nf))
         else:
             materials = obj_materials(model, size)
             path = os.path.join(args.outdir, name + ".obj")
             nv, nf = tmd.write_obj(path, model, size, name, transforms,
-                                   not args.psx_axes, materials)
+                                   not args.psx_axes, materials, swatches)
             posed = " posed" if transforms else ""
             print("%s (%d objects, %d vertices, %d faces%s)"
                   % (path, len(model.objects), nv, nf, posed))

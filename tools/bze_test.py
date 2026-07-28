@@ -650,7 +650,8 @@ def test_surface():
     check(uvs[0] == (16 / tmd.TEXTURE_PAGE_SIZE,
                      1.0 - 144 / tmd.TEXTURE_PAGE_SIZE),
           "the first UV is %r" % (uvs[0],))
-    check(colours[0] == (2 / 255.0, 4 / 255.0, 8 / 255.0, 1.0),
+    # colours are PSX modulation factors, neutral at 0x80, so /128
+    check(colours[0] == (2 / 128.0, 4 / 128.0, 8 / 128.0, 1.0),
           "the first colour is %r" % (colours[0],))
 
     # an untextured primitive still gets colours, but no UVs to go with them
@@ -659,7 +660,31 @@ def test_surface():
         plain, plain.objects[0], len(make_tmd_with_quad()), y_up=False)
     check(plain_uvs == [], "an untextured face produced UVs: %r" % (plain_uvs,))
     check(plain_tex == [None],
-          "an untextured face should carry no texture index: %r" % (plain_tex,))
+          "a swatch face's texture is baked, so its index must be None: %r"
+          % (plain_tex,))
+
+    # a face without UVs shades a solid swatch: neutral 0x80 shade times a
+    # red swatch has to come out pure red, and the swatch face must not be
+    # reported as textured
+    swatch_record = bytearray(make_tmd_with_quad())
+    at = tmd.HEADER_SIZE + tmd.OBJECT_SIZE
+    layout = tmd.PRIMITIVE_LAYOUT[0x4E]
+    struct.pack_into("<H", swatch_record, at + layout["clut"], 9)
+    for c in layout["colours"]:
+        swatch_record[at + c:at + c + 3] = bytes((0x80, 0x80, 0x80))
+    swatched = tmd.parse(bytes(swatch_record))
+    _p, _u, sw_cols, _l, sw_tex = tmd.object_geometry(
+        swatched, swatched.objects[0], len(swatch_record), y_up=False,
+        swatches={9: (255, 0, 0)})
+    check(sw_tex == [None],
+          "a swatch face leaked its texture index: %r" % (sw_tex,))
+    check(all(c == (1.0, 0.0, 0.0, 1.0) for c in sw_cols),
+          "a neutral shade on a red swatch gave %r" % (sw_cols[:1],))
+    # without the swatch mapping it falls back to the bare grey shade
+    _p, _u, bare_cols, _l, _t = tmd.object_geometry(
+        swatched, swatched.objects[0], len(swatch_record), y_up=False)
+    check(all(c == (1.0, 1.0, 1.0, 1.0) for c in bare_cols),
+          "the bare neutral shade should be white: %r" % (bare_cols[:1],))
     check(len(plain_colours) == 4,
           "expected 4 colours, got %d" % len(plain_colours))
 
@@ -674,7 +699,7 @@ def test_surface():
     v_lines = [l for l in lines if l.startswith("v ")]
     check(len(v_lines[0].split()) == 7,
           "a `v` line should carry three colour channels: %r" % v_lines[0])
-    check(v_lines[0].split()[4:] == ["0.00784314", "0.0156863", "0.0313725"],
+    check(v_lines[0].split()[4:] == ["0.015625", "0.03125", "0.0625"],
           "the colour on the first `v` line is %r" % (v_lines[0],))
     vt_lines = [l for l in lines if l.startswith("vt ")]
     check(len(vt_lines) == 4, "expected 4 `vt` lines, got %d" % len(vt_lines))

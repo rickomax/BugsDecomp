@@ -86,8 +86,13 @@ with `f v/vt` faces. In glTF they are `COLOR_0` and `TEXCOORD_0`.
 Textures come along too: each face carries an index into the level's texture
 registrations, so the OBJ writers drop a `<stem>.mtl` plus the referenced
 textures as `<stem>_tex_NNN.png` beside the models, and the glTF writer embeds
-the PNGs in the `.glb` as materials. Nothing needs switching on; models that
-use no registered texture simply get no material.
+the PNGs in the `.glb` as materials. Nothing needs switching on.
+
+Faces without UVs reference a texture as well -- normally a tiny solid-colour
+swatch -- and shade it with their per-corner values. Since neither format can
+multiply a texture into vertex colours per face, that product is baked into
+the exported colour instead, which is where the flat-shaded geometry's skin
+and cloth colours come from.
 
 ### anims
 
