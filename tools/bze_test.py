@@ -439,6 +439,8 @@ def test_tmd():
 
     verts = model.vertices(model.objects[1])
     check(len(verts) == 4, "read %d vertices, expected 4" % len(verts))
+    check(len(model.all_vertices()) == 7,
+          "the record should hold 7 vertices across its objects")
     check(verts[2] == (2.0, 4.0, 6.0),
           "vertex 2 came out as %r, expected (2.0, 4.0, 6.0)" % (verts[2],))
 

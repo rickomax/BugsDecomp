@@ -9,13 +9,16 @@ relative-offset scheme are the PSX format, and `GsMapModelingData` (v1.0
 converted for the PC, though, so a stock PSX TMD reader will not read them:
 
 - vertices are 16 bytes, not the PSX's 8-byte packed SVECTOR. Each holds three
-  IEEE floats and the vertex's own index. This is verified: every vertex area
-  across the known levels is exactly `count * 16` bytes.
-- primitive packets are variable length and do not follow the PSX's
-  olen/ilen/flag/mode header. What they do follow is not worked out yet; see
-  `doc/bze.md`.
-
-So this reads the structure and the vertices, and leaves primitives alone.
+  IEEE floats and a fourth field of unclear purpose -- it is a running index in
+  some records and zero throughout in others, so nothing here relies on it.
+  What is verified is the stride: every vertex area across the known levels is
+  exactly `count * 16` bytes.
+- primitive packets are variable length and do not use the PSX's
+  olen/ilen/flag/mode header. Byte 3 of a packet is a mode that fixes its
+  length, and the vertex indices sit at fixed slots within it; both were
+  recovered from the data, and `PRIMITIVES` records what came out.
+- vertex indices are numbered across the whole record, not per object, which
+  is also what each vertex's own index field counts.
 
 Usage:
 
@@ -35,6 +38,26 @@ HEADER_SIZE = 12
 OBJECT_SIZE = 28
 # three floats and the vertex's index
 VERTEX_SIZE = 16
+
+# Primitive packets, keyed by the mode byte at offset 3. `size` is the whole
+# packet; `slots` are the 16-bit slots within it holding the vertex indices, in
+# winding order.
+#
+# Both were recovered from the levels rather than from any documentation, and
+# both are pinned down hard: the sizes are the only ones that let every
+# primitive area partition exactly into its object's primitive count, and for
+# each mode the slots are the only choice valid across every packet -- for the
+# triangle they are the unique such choice out of all 560 possibilities.
+PRIMITIVES = {
+    0x38: (28, (10, 11, 12, 13)),
+    0x3C: (32, (7, 14, 15)),
+    0x40: (40, (16, 17, 18, 19)),
+    0x4A: (28, (10, 11, 12, 13)),
+    0x4E: (32, (12, 13, 14, 15)),
+    # 16 bytes, and only ever seen in objects that have no vertices at all, so
+    # what it draws is unknown; it carries no vertex indices
+    0x64: (16, ()),
+}
 
 
 class TmdError(Exception):
@@ -84,6 +107,65 @@ class Tmd:
                 raise TmdError("vertex %d runs past the end of the data" % i)
             x, y, z = struct.unpack_from("<3f", self._data, at)
             out.append((x, y, z))
+        return out
+
+    def all_vertices(self):
+        """Returns the record's vertices, in the order primitives index them.
+
+        Primitives index vertices across the whole record rather than per
+        object, and the numbering follows the order the vertex areas sit in,
+        so the objects are concatenated in that order.
+        """
+
+        out = []
+        for obj in sorted(self.objects, key=lambda o: o.vert_top):
+            out.extend(self.vertices(obj))
+        return out
+
+    def primitive_area(self, obj, size):
+        """Returns (start, length) of an object's primitive packets.
+
+        Objects interleave their areas, so an area runs until whichever area
+        starts next, not until the object's own next field.
+        """
+
+        starts = sorted({s for o in self.objects
+                         for s in (o.prim_top, o.vert_top, o.normal_top)}
+                        | {size - HEADER_SIZE})
+        end = next((s for s in starts if s > obj.prim_top),
+                   size - HEADER_SIZE)
+        return self.base + obj.prim_top, end - obj.prim_top
+
+    def faces(self, size):
+        """Returns the record's faces, as tuples of vertex indices.
+
+        Raises TmdError if the packets do not partition an object's primitive
+        area exactly, which is what says the mode table read them correctly.
+        """
+
+        out = []
+        for obj in self.objects:
+            if not obj.n_prim:
+                continue
+            base, span = self.primitive_area(obj, size)
+            pos = 0
+            for i in range(obj.n_prim):
+                if pos + 4 > span:
+                    raise TmdError("primitive %d runs past its area" % i)
+                mode = self._data[base + pos + 3]
+                if mode not in PRIMITIVES:
+                    raise TmdError("unknown primitive mode 0x%02x" % mode)
+                packet_size, slots = PRIMITIVES[mode]
+                if pos + packet_size > span:
+                    raise TmdError("primitive %d runs past its area" % i)
+                if slots:
+                    values = struct.unpack_from(
+                        "<%dH" % (packet_size // 2), self._data, base + pos)
+                    out.append(tuple(values[s] for s in slots))
+                pos += packet_size
+            if pos != span:
+                raise TmdError(
+                    "primitives filled %d of %d bytes" % (pos, span))
         return out
 
 
@@ -149,23 +231,34 @@ def check(model, size):
     return problems
 
 
-def write_obj(path, model, name="model"):
-    """Writes a model's vertices out as a Wavefront OBJ.
+def write_obj(path, model, size, name="model"):
+    """Writes a model out as a Wavefront OBJ.
 
-    Only vertices; the primitives that would join them into faces are not
-    decoded yet, so this is a point cloud.
+    Vertex indices run across the whole record, so the vertices go out as one
+    list and the faces index into it.
     """
+
+    verts = model.all_vertices()
+    try:
+        faces = model.faces(size)
+    except TmdError:
+        # the geometry is still worth writing out without them
+        faces = []
 
     with open(path, "w", encoding="utf-8", newline="\n") as fp:
         fp.write("# %s, from a BBLiT model record\n" % name)
-        fp.write("# vertices only; faces are not decoded yet\n")
-        for i, obj in enumerate(model.objects):
-            verts = model.vertices(obj)
-            if not verts:
-                continue
-            fp.write("o %s_%d\n" % (name, i))
-            for x, y, z in verts:
-                fp.write("v %g %g %g\n" % (x, y, z))
+        fp.write("o %s\n" % name)
+        for x, y, z in verts:
+            fp.write("v %g %g %g\n" % (x, y, z))
+        for face in faces:
+            # a quad is stored the PSX way, as two triangles sharing an edge
+            # (0,1,2 and 1,2,3), so its corners have to be walked 0,1,3,2 to
+            # come out as a loop rather than a bowtie
+            if len(face) == 4:
+                face = (face[0], face[1], face[3], face[2])
+            # OBJ counts vertices from 1
+            fp.write("f %s\n" % " ".join(str(i + 1) for i in face))
+    return len(verts), len(faces)
 
 
 def main(argv=None):
@@ -208,10 +301,9 @@ def main(argv=None):
     os.makedirs(args.outdir, exist_ok=True)
     stem = os.path.splitext(os.path.basename(args.file))[0]
     path = os.path.join(args.outdir, stem + ".obj")
-    write_obj(path, model, stem)
-    print("%s (%d objects, %d vertices)"
-          % (path, len(model.objects),
-             sum(o.n_vert for o in model.objects)))
+    nverts, nfaces = write_obj(path, model, len(data), stem)
+    print("%s (%d objects, %d vertices, %d faces)"
+          % (path, len(model.objects), nverts, nfaces))
     return 0
 
 

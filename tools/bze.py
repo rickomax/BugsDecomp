@@ -652,7 +652,7 @@ def cmd_models(args):
                 fp.write(data[offset:offset + size])
         else:
             path = os.path.join(args.outdir, name + ".obj")
-            tmd.write_obj(path, model, name)
+            tmd.write_obj(path, model, size, name)
         print("%s (%d objects, %d vertices)" % (path, len(model.objects),
                                                 verts))
     return 0

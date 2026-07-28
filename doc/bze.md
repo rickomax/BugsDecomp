@@ -646,17 +646,70 @@ that. In every record of every known level the furthest offset lands exactly at
 the end of the record, which is what confirms the layout.
 
 The contents of each area were converted for the PC, though, so a PSX TMD
-reader will not read them:
+reader will not read them.
 
-* **vertices are 16 bytes**, not the PSX's packed 8-byte `SVECTOR`. Each holds
-three IEEE floats and the vertex's own index as an `int`. Every vertex area
-across the known levels is exactly `count * 16` bytes.
-* **primitive packets are variable length** and do not use the PSX's
-`olen`/`ilen`/`flag`/`mode` header; walking them that way desynchronizes at
-once. Packet sizes of 16, 28, 30, 32, 36 and 40 bytes have been seen. What
-picks the size is not worked out yet. One lead: in a 32-byte packet the last
-four `short`s are all less than the object's vertex count, so the vertex
-indices appear to sit at the end of the packet.
+### Vertices
+
+Vertices are **16 bytes**, not the PSX's packed 8-byte `SVECTOR`:
+
+| offset | type  | usage                |
+|--------|-------|----------------------|
+| 0x0    | float | X                    |
+| 0x4    | float | Y                    |
+| 0x8    | float | Z                    |
+| 0xc    | int   | varies; see below    |
+
+Every vertex area across the known levels is exactly `count * 16` bytes, which
+is what confirms the stride. The last field is a running vertex number in some
+records and zero throughout in others, so nothing should depend on it.
+
+Primitives number vertices across the whole record rather than per object, with
+the objects counted in the order their vertex areas appear.
+
+### Primitives
+
+Primitive packets are variable length. Byte 3 is a mode that fixes the length,
+and the vertex indices sit at fixed 16-bit slots inside the packet:
+
+| mode | size | index slots  | shape    |
+|------|------|--------------|----------|
+| 0x38 | 28   | 10,11,12,13  | quad     |
+| 0x3c | 32   | 7,14,15      | triangle |
+| 0x40 | 40   | 16,17,18,19  | quad     |
+| 0x4a | 28   | 10,11,12,13  | quad     |
+| 0x4e | 32   | 12,13,14,15  | quad     |
+| 0x64 | 16   | none         | unknown  |
+
+Neither the sizes nor the slots are documented anywhere; both were recovered
+from the levels, and both are pinned down tightly:
+
+* the sizes are the only ones under which every primitive area partitions
+exactly into its object's primitive count (744 of 754 areas; the other 10 use
+three further modes, 0x00, 0x08 and 0x44, that are too rare to pin down)
+* for each mode the slots are the only choice valid across every packet of that
+mode. For the triangle they are the unique such choice out of all 560
+possibilities, which is what identifies it as a triangle rather than a quad.
+
+A quad's four corners are stored the PSX way, as two triangles sharing an edge
+(0,1,2 and 1,2,3), so they have to be walked 0,1,3,2 to give a loop rather than
+a bowtie. Across the known levels that ordering gives the shorter perimeter for
+7748 quads against 3622 for the stored order.
+
+Mode 0x64 appears only in objects that have no vertices at all, so whatever it
+draws, it is not geometry.
+
+The rest of each packet is not worked out. A 0x3c packet carries three RGB
+triples, which is consistent with a gouraud triangle, and the textured modes
+carry what look like per-vertex UV pairs, but none of that is confirmed.
+
+### How Good Is The Result
+
+Faces decoded this way never reference a vertex outside the record, across 5644
+of them. The geometry is coherent rather than exact: 2.6% of faces are
+degenerate, and decoded edges are 2.5 times shorter at the median than random
+vertex picks from the same model would give. That is consistent with the
+indices being right, but it is not the byte-exact confirmation the container and
+the vertex stride have.
 
 ## Other Assets
 
@@ -686,8 +739,8 @@ byte-exact and every tag length in this document is right: one wrong byte and
 the walk desynchronizes immediately. It runs clean over all 10 known levels,
 each ending on its `2f` terminator with nothing left over.
 
-`textures` writes each TIM out as a PNG, and `models` writes each model's
-vertices out as a Wavefront OBJ, or the record itself with `--raw`. The two
+`textures` writes each TIM out as a PNG, and `models` writes each model out as
+a Wavefront OBJ with faces, or the record itself with `--raw`. The two
 formats are also readable on their own, through `tools/tim.py` and
 `tools/tmd.py`.
 
