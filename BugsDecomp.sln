@@ -19,6 +19,18 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "doc", "doc", "{F128BD5B-323
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "BugsDecomp", "BugsDecomp\BugsDecomp.vcxproj", "{F8682F5E-67F6-4206-AA52-80374D236DC6}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{B7C2F9A4-1D6E-4A83-9F52-3C0E5A9D41B7}"
+	ProjectSection(SolutionItems) = preProject
+		tools\check_recon.py = tools\check_recon.py
+		tools\recon.py = tools\recon.py
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "recon", "recon", "{4E8D1A66-92B5-4C07-8A31-6F2B9C0D5E48}"
+	ProjectSection(SolutionItems) = preProject
+		recon\COVERAGE.md = recon\COVERAGE.md
+		recon\README.md = recon\README.md
+	EndProjectSection
+EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{E28D42F5-740F-44D5-8956-8078315D64FD}"
 	ProjectSection(SolutionItems) = preProject
 		doc\src\funcgen.py = doc\src\funcgen.py

@@ -16,6 +16,12 @@ The VS solution consists of the following projects:
 - [BugsDecomp](#bugsdecomp) - DLL containing decompiled code
 - [Launcher](#launcher) - CLI game launcher
 
+Alongside them are two directories that are not built:
+
+- `Decomp` - raw Hex-Rays exports of the game and its launcher
+- `recon` - the v1.0 export reorganized into named, per-module source; see
+[recon/README.md](recon/README.md)
+
 ## BugsDecomp
 
 DLL project which contains all the decompiled code for the game. Will attempt to
@@ -74,3 +80,23 @@ any code is run (including the DLL's attach code).
 NOTE: because the launcher is a DLL injector, it may be incorrectly flagged as a
 virus by your AntiVirus. If so, you will need to add the launcher to its list of
 exclusions.
+
+# Source Reconstruction
+
+`recon/` holds the v1.0 Hex-Rays export reorganized into something that reads
+like source: functions carry the names recorded in `doc/src/funcs.csv`, calls
+and data references resolve to those names, and the whole thing is split into
+files approximating the game's original translation units. It is a starting
+point for decompilation, not decompiled code -- see
+[recon/README.md](recon/README.md) for what rests on evidence and what is
+inferred.
+
+It is regenerated from the export rather than edited:
+
+```
+python3 tools/recon.py       # rebuild recon/ from Decomp/ and doc/src/funcs.csv
+python3 tools/check_recon.py # verify the rewrite lost and invented nothing
+```
+
+Adding a function to `doc/src/funcs.csv` and regenerating names it in `recon/`,
+and at every call site across the other modules.

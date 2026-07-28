@@ -289,6 +289,26 @@ The BZE file format is detailed [here](bze.md).
 
 More details about (known) functions can be found [here](functions.md).
 
+# Original Source Layout
+
+The game was built from `D:\Projets\Bugs\src\` on the developers' machines. Two
+of the original source file names survive in the v1.0 binary, in assert-style
+strings that name the file reporting the error:
+
+| string address | file                              |
+|----------------|-----------------------------------|
+| 0x46ae70       | `D:\Projets\Bugs\src\Pcrogl.c`    |
+| 0x46af34       | `D:\Projets\Bugs\src\pcrsoft8.c`  |
+
+`Pcrogl.c` is the OpenGL renderer, i.e. the `rogl` functions; the string is
+referenced from 0x40d740, 0x40d8b0 and 0x40e820, which places the whole of that
+translation unit between those addresses. `pcrsoft8.c` is presumably the 8-bit
+color software renderer (see [`renderer` values](#configpc)); its string is
+referenced only from 0x41a970.
+
+No other source file names appear in the binary; it was not built with debug
+information.
+
 # PlayStation Input Emulation
 
 Internally, the game reads input from keyboard and/or joystick and maps it to a
